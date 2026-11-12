@@ -1,13 +1,18 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "installCommand": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --target wasm32-unknown-unknown",
-  "buildCommand": ". \"$HOME/.cargo/env\" && bash scripts/build-web.sh",
+  "installCommand": "if ! command -v rustup >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none; fi; [ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown && rustup default stable && rustc --version",
+  "buildCommand": "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; rustc --version && bash scripts/build-web.sh",
   "outputDirectory": "dist/web",
   "headers": [
     {
       "source": "/(.*)\\.(wasm|js)",
-      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
     }
   ]
 }
