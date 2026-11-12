@@ -193,6 +193,7 @@ pub struct Fx {
     last_drop_at: Option<f32>,
     drop_interval: f32,
     motion: Motion,
+    presented: Vec<Event>,
     time: f32,
 }
 
@@ -273,6 +274,7 @@ impl Fx {
             // Assume a relaxed pace until we've seen some drops.
             drop_interval: DROP_INTERVAL_CAP,
             motion,
+            presented: Vec::new(),
             time: 0.0,
         }
     }
@@ -310,8 +312,12 @@ impl Fx {
     }
 
     pub fn handle(&mut self, event: &Event) {
-        // The next piece is already live even while the last one is still falling
-        // on screen, so snapping must not wait in the drop queue.
+        // The next piece is already live while the last one is still falling on
+        // screen: its events (and their sounds) must never wait in the drop queue.
+        let live_piece = matches!(
+            event,
+            Event::Moved | Event::Rotated | Event::SoftDropped | Event::Held | Event::Spawned
+        );
         if matches!(event, Event::Spawned | Event::Held) {
             self.snap_active = true;
         }
@@ -338,14 +344,23 @@ impl Fx {
                 if self.drop.as_ref().is_some_and(|d| d.duration < DROP_MIN_TIME) {
                     self.land();
                 }
+            } else {
+                // Already on the floor: nothing to animate, but it still "lands".
+                self.presented.push(event.clone());
             }
             return;
         }
 
         match &mut self.drop {
-            Some(drop) => drop.queued.push(event.clone()),
-            None => self.apply(event),
+            Some(drop) if !live_piece => drop.queued.push(event.clone()),
+            _ => self.apply(event),
         }
+    }
+
+    /// Events in the order and at the moment they were shown on screen; a hard
+    /// drop appears when its piece lands. Drain once per frame (audio uses this).
+    pub fn take_presented(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.presented)
     }
 
     /// Ends an in-flight hard drop: impact effects, then everything that was queued.
@@ -354,12 +369,18 @@ impl Fx {
             return;
         };
         self.impact(&drop);
+        self.presented.push(Event::HardDropped {
+            piece: drop.piece,
+            distance: drop.distance,
+            board: drop.board.clone(),
+        });
         for event in &drop.queued {
             self.apply(event);
         }
     }
 
     fn apply(&mut self, event: &Event) {
+        self.presented.push(event.clone());
         match event {
             Event::Locked { piece } => {
                 // A new lock must never be drawn on rows that are still sliding:
@@ -841,6 +862,41 @@ mod tests {
         fx.handle(&Event::Locked { piece: o_piece(37) });
         assert_eq!(fx.row_offset(10), 0.0);
         assert!(fx.clears.iter().flat_map(|a| &a.rows).all(|r| r.burst.iter().all(|&b| b)));
+    }
+
+    fn kinds(events: &[Event]) -> Vec<&'static str> {
+        events
+            .iter()
+            .map(|e| match e {
+                Event::HardDropped { .. } => "drop",
+                Event::Locked { .. } => "lock",
+                Event::LinesCleared(_) => "clear",
+                Event::Moved => "move",
+                Event::Spawned => "spawn",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hard_drop_is_presented_at_landing_with_its_follow_ups() {
+        let mut fx = Fx::default();
+        fx.handle(&hard_drop(18));
+        fx.handle(&Event::Locked { piece: o_piece(37) });
+        fx.handle(&single_clear());
+        fx.handle(&Event::Spawned);
+        fx.handle(&Event::Moved); // the next piece moving mid-flight
+        assert_eq!(kinds(&fx.take_presented()), ["spawn", "move"], "live piece isn't delayed");
+
+        fx.update(DROP_MAX_TIME + 0.01);
+        assert_eq!(kinds(&fx.take_presented()), ["drop", "lock", "clear"]);
+    }
+
+    #[test]
+    fn zero_distance_hard_drop_is_presented_immediately() {
+        let mut fx = Fx::default();
+        fx.handle(&hard_drop(0));
+        assert_eq!(kinds(&fx.take_presented()), ["drop"]);
     }
 
     #[test]

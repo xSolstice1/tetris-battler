@@ -124,7 +124,7 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
     v.outline(x, y, w, h, 2.0, hex(0x262c3d));
 }
 
-pub fn draw(game: &Game, paused: bool, fx: &Fx) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(fx.shake_offset());
     let field_bg = hex(0x10131c);
@@ -224,6 +224,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx) {
     let motion_y = BOARD_Y + 420.0 + controls.len() as f32 * 22.0 + 8.0;
     v.text("M  motion:", LEFT_X, motion_y, 18.0, hex(0x5d6680));
     v.text(fx.motion().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
+    v.text("N  sound:", LEFT_X, motion_y + 22.0, 18.0, hex(0x5d6680));
+    v.text(if sound_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 22.0, 18.0, hex(0x9aa3b8));
 
     // Next queue on the right.
     let slot = 80.0;

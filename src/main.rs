@@ -1,3 +1,4 @@
+mod audio;
 mod bag;
 mod board;
 #[cfg(debug_assertions)]
@@ -10,6 +11,7 @@ mod render;
 
 use macroquad::prelude::*;
 
+use audio::Audio;
 use fx::Fx;
 use game::Game;
 use input::Input;
@@ -37,6 +39,7 @@ async fn main() {
     let mut game = Game::new(new_seed());
     let mut input = Input::default();
     let mut fx = Fx::default();
+    let mut audio = Audio::load().await;
     let mut paused = false;
 
     loop {
@@ -45,6 +48,9 @@ async fn main() {
 
         if is_key_pressed(KeyCode::M) {
             fx.set_motion(fx.motion().toggled());
+        }
+        if is_key_pressed(KeyCode::N) {
+            audio.toggle_mute();
         }
 
         if game.game_over {
@@ -73,9 +79,12 @@ async fn main() {
             }
             fx.follow_active(game.active.y, game.grounded(), dt);
             fx.update(dt);
+            for event in fx.take_presented() {
+                audio.handle(&event);
+            }
         }
 
-        render::draw(&game, paused, &fx);
+        render::draw(&game, paused, &fx, !audio.muted());
         next_frame().await;
     }
 }
