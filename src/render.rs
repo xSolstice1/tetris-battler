@@ -313,5 +313,6 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, sound_on: bool, motion: Mo
         motion.label(),
         if sound_on { "on" } else { "off" }
     );
-    v.text_centered(&footer, cx, 730.0, 18.0, hex(0x5d6680));
+    v.text_centered(&footer, cx, 712.0, 18.0, hex(0x5d6680));
+    v.text_centered("made by xSolstice1  ·  github.com/xSolstice1", cx, 742.0, 16.0, hex(0x3d4458));
 }
