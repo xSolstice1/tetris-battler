@@ -15,6 +15,60 @@ const DAMAGE_PER_ATTACK: u32 = 2;
 /// How long a damage number stays on screen.
 pub const HIT_POPUP_TIME: f32 = 0.9;
 
+/// Shield monsters start with a shield worth this share of their max HP.
+const SHIELD_FRACTION: f32 = 0.4;
+const FOG_EVERY: f32 = 12.0;
+const FOG_TIME: f32 = 5.0;
+const HASTE_EVERY: f32 = 14.0;
+const HASTE_TIME: f32 = 4.0;
+/// Gravity speed multiplier while Haste is active.
+const HASTE_SCALE: f32 = 4.0;
+/// Regen heals this share of max HP per second...
+const REGEN_RATE: f32 = 0.015;
+/// ...once the player has gone this long without landing a hit.
+const REGEN_DELAY: f32 = 3.0;
+/// Abilities start at this tier and cycle in `Ability::ALL` order.
+const FIRST_ABILITY_TIER: u32 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ability {
+    Shield,
+    Fog,
+    Haste,
+    Regen,
+}
+
+impl Ability {
+    pub const ALL: [Ability; 4] = [Ability::Shield, Ability::Fog, Ability::Haste, Ability::Regen];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Ability::Shield => "SHIELD",
+            Ability::Fog => "FOG",
+            Ability::Haste => "HASTE",
+            Ability::Regen => "REGEN",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Ability::Shield => "absorbs damage before HP",
+            Ability::Fog => "hides your next pieces",
+            Ability::Haste => "speeds up your gravity",
+            Ability::Regen => "heals if you stop hitting",
+        }
+    }
+
+    /// (seconds between triggers, seconds active) for timed abilities.
+    fn timing(self) -> Option<(f32, f32)> {
+        match self {
+            Ability::Fog => Some((FOG_EVERY, FOG_TIME)),
+            Ability::Haste => Some((HASTE_EVERY, HASTE_TIME)),
+            Ability::Shield | Ability::Regen => None,
+        }
+    }
+}
+
 pub const SPRITE_W: usize = 10;
 pub const SPRITE_H: usize = 8;
 
@@ -52,6 +106,7 @@ pub struct Monster {
     pub attack_lines: u32,
     /// Gravity level the player's field runs at during this fight.
     pub gravity_level: u32,
+    pub ability: Option<Ability>,
     pub sprite: [[bool; SPRITE_W]; SPRITE_H],
 }
 
@@ -96,6 +151,8 @@ pub fn monster(tier: u32) -> Monster {
         attack_every: (10.0 - 0.6 * t).max(3.5),
         attack_lines: (1 + (tier - 1) / 2).min(6),
         gravity_level: tier.min(15),
+        ability: (tier >= FIRST_ABILITY_TIER)
+            .then(|| Ability::ALL[(tier - FIRST_ABILITY_TIER) as usize % Ability::ALL.len()]),
         sprite: sprite_for(tier),
     }
 }
@@ -120,6 +177,7 @@ pub enum BattleEvent {
     MonsterAttack { lines: u32 },
     Defeated { tier: u32 },
     NewMonster { tier: u32 },
+    AbilityStarted(Ability),
     Lost(Defeat),
 }
 
@@ -134,6 +192,14 @@ pub struct Battle {
     pub total_damage: u32,
     /// Recent hits for the UI: (damage, age in seconds).
     pub hits: Vec<(u32, f32)>,
+    /// Remaining shield (Shield monsters).
+    pub shield: u32,
+    /// Seconds until a timed ability (Fog, Haste) next triggers.
+    pub ability_cooldown: f32,
+    /// Seconds a timed ability has left while active; 0 when inactive.
+    pub ability_active: f32,
+    since_hit: f32,
+    regen_acc: f32,
     events: Vec<BattleEvent>,
 }
 
@@ -149,6 +215,11 @@ impl Battle {
             defeated: 0,
             total_damage: 0,
             hits: Vec::new(),
+            shield: 0,
+            ability_cooldown: 0.0,
+            ability_active: 0.0,
+            since_hit: 0.0,
+            regen_acc: 0.0,
             events: Vec::new(),
         };
         battle.enter(monster(1), game);
@@ -159,9 +230,69 @@ impl Battle {
         self.hp = m.max_hp;
         self.time_left = m.time_limit;
         self.attack_timer = m.attack_every;
+        self.shield = match m.ability {
+            Some(Ability::Shield) => (m.max_hp as f32 * SHIELD_FRACTION).round() as u32,
+            _ => 0,
+        };
+        self.ability_cooldown = m.ability.and_then(Ability::timing).map_or(0.0, |(every, _)| every);
+        self.ability_active = 0.0;
+        self.since_hit = 0.0;
+        self.regen_acc = 0.0;
         game.set_level(m.gravity_level);
+        game.gravity_scale = 1.0;
         self.monster = m;
         self.phase = Phase::Fighting;
+    }
+
+    /// Debug builds: jump straight to the next monster.
+    #[cfg(debug_assertions)]
+    pub fn skip_monster(&mut self, game: &mut Game) {
+        if !self.over() {
+            game.clear_pending_garbage();
+            self.enter(monster(self.monster.tier + 1), game);
+        }
+    }
+
+    /// Fog is hiding the player's next queue right now.
+    pub fn next_hidden(&self) -> bool {
+        self.phase == Phase::Fighting && self.monster.ability == Some(Ability::Fog) && self.ability_active > 0.0
+    }
+
+    /// A timed ability is currently in effect (for the UI).
+    pub fn ability_in_effect(&self) -> bool {
+        self.phase == Phase::Fighting && self.ability_active > 0.0
+    }
+
+    fn update_ability(&mut self, dt: f32, game: &mut Game) {
+        let Some(ability) = self.monster.ability else {
+            return;
+        };
+        if let Some((every, active_for)) = ability.timing() {
+            if self.ability_active > 0.0 {
+                self.ability_active = (self.ability_active - dt).max(0.0);
+            } else {
+                self.ability_cooldown -= dt;
+                if self.ability_cooldown <= 0.0 {
+                    self.ability_cooldown += every;
+                    self.ability_active = active_for;
+                    self.events.push(BattleEvent::AbilityStarted(ability));
+                }
+            }
+        }
+        game.gravity_scale = if ability == Ability::Haste && self.ability_active > 0.0 {
+            HASTE_SCALE
+        } else {
+            1.0
+        };
+        if ability == Ability::Regen {
+            self.since_hit += dt;
+            if self.since_hit >= REGEN_DELAY && self.hp < self.monster.max_hp {
+                self.regen_acc += REGEN_RATE * self.monster.max_hp as f32 * dt;
+                let heal = self.regen_acc.floor();
+                self.regen_acc -= heal;
+                self.hp = (self.hp + heal as u32).min(self.monster.max_hp);
+            }
+        }
     }
 
     pub fn over(&self) -> bool {
@@ -184,9 +315,13 @@ impl Battle {
         if damage == 0 {
             return;
         }
-        let dealt = damage.min(self.hp);
+        let absorbed = damage.min(self.shield);
+        self.shield -= absorbed;
+        let dealt = (damage - absorbed).min(self.hp);
         self.hp -= dealt;
-        self.total_damage += dealt;
+        self.total_damage += absorbed + dealt;
+        self.since_hit = 0.0;
+        self.regen_acc = 0.0;
         self.hits.push((damage, 0.0));
         self.events.push(BattleEvent::Hit { damage });
         if self.hp == 0 {
@@ -195,6 +330,8 @@ impl Battle {
                 tier: self.monster.tier,
             });
             game.clear_pending_garbage();
+            game.gravity_scale = 1.0;
+            self.ability_active = 0.0;
             self.phase = Phase::Intermission { left: INTERMISSION };
         }
     }
@@ -221,6 +358,7 @@ impl Battle {
                     self.lose(Defeat::Timeout);
                     return;
                 }
+                self.update_ability(dt, game);
                 self.attack_timer -= dt;
                 if self.attack_timer <= 0.0 {
                     self.attack_timer += self.monster.attack_every;
@@ -375,6 +513,80 @@ mod tests {
         b.update(0.016, &mut game);
         assert_eq!(b.phase, Phase::Over(Defeat::ToppedOut));
         assert!(b.take_events().contains(&BattleEvent::Lost(Defeat::ToppedOut)));
+    }
+
+    /// A battle already facing the monster at `tier`.
+    fn at_tier(tier: u32) -> (Game, Battle) {
+        let (mut game, mut b) = setup();
+        b.enter(monster(tier), &mut game);
+        (game, b)
+    }
+
+    #[test]
+    fn abilities_start_at_tier_three_and_cycle() {
+        assert_eq!(monster(1).ability, None);
+        assert_eq!(monster(2).ability, None);
+        let cycle: Vec<_> = (3..11).map(|t| monster(t).ability.unwrap()).collect();
+        assert_eq!(cycle[..4], Ability::ALL);
+        assert_eq!(cycle[4..], Ability::ALL);
+    }
+
+    #[test]
+    fn shield_absorbs_damage_first() {
+        let (mut game, mut b) = at_tier(3);
+        let max = b.monster.max_hp;
+        let shield = b.shield;
+        assert_eq!(shield, (max as f32 * SHIELD_FRACTION).round() as u32);
+        b.on_game_event(&clear(1, 0), &mut game);
+        assert_eq!((b.shield, b.hp), (shield - 1, max), "HP untouched while shielded");
+        b.on_game_event(&clear(4, 40), &mut game); // way more than the shield
+        assert_eq!(b.shield, 0);
+        assert!(b.hp < max);
+    }
+
+    #[test]
+    fn fog_hides_the_queue_on_a_cycle() {
+        let (mut game, mut b) = at_tier(4);
+        assert!(!b.next_hidden());
+        b.update(FOG_EVERY + 0.01, &mut game);
+        assert!(b.next_hidden());
+        assert!(b.take_events().contains(&BattleEvent::AbilityStarted(Ability::Fog)));
+        b.update(FOG_TIME, &mut game);
+        assert!(!b.next_hidden());
+    }
+
+    #[test]
+    fn haste_speeds_gravity_temporarily() {
+        let (mut game, mut b) = at_tier(5);
+        b.update(HASTE_EVERY + 0.01, &mut game);
+        assert_eq!(game.gravity_scale, HASTE_SCALE);
+        b.update(HASTE_TIME + 0.01, &mut game);
+        assert_eq!(game.gravity_scale, 1.0);
+    }
+
+    #[test]
+    fn regen_heals_only_after_a_lull() {
+        let (mut game, mut b) = at_tier(6);
+        b.on_game_event(&clear(4, 4), &mut game);
+        let after_hit = b.hp;
+        b.update(REGEN_DELAY - 0.5, &mut game);
+        assert_eq!(b.hp, after_hit, "no healing right after a hit");
+        b.update(2.0, &mut game);
+        assert!(b.hp > after_hit);
+        for _ in 0..200 {
+            b.update(0.5, &mut game);
+        }
+        assert!(b.hp <= b.monster.max_hp);
+    }
+
+    #[test]
+    fn killing_a_haste_monster_restores_gravity() {
+        let (mut game, mut b) = at_tier(5);
+        b.update(HASTE_EVERY + 0.01, &mut game);
+        for _ in 0..20 {
+            b.on_game_event(&clear(4, 4), &mut game);
+        }
+        assert_eq!(game.gravity_scale, 1.0);
     }
 
     #[test]

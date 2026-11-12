@@ -250,15 +250,27 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
 
     // Next queue on the right.
     let slot = 80.0;
-    panel(&v, "NEXT", RIGHT_X, BOARD_Y, PANEL_W, slot * game.next.len() as f32 + 10.0);
-    for (i, &kind) in game.next.iter().enumerate() {
-        draw_mini_piece(
-            &v,
-            kind,
-            RIGHT_X + PANEL_W / 2.0,
-            BOARD_Y + 45.0 + i as f32 * slot,
-            piece_color(kind),
-        );
+    let queue_h = slot * game.next.len() as f32 + 10.0;
+    panel(&v, "NEXT", RIGHT_X, BOARD_Y, PANEL_W, queue_h);
+    if battle.is_some_and(Battle::next_hidden) {
+        // Fog ability: the queue is hidden behind drifting murk.
+        let t = get_time() as f32;
+        for i in 0..6 {
+            let y = BOARD_Y + 8.0 + i as f32 * (queue_h - 16.0) / 6.0;
+            let drift = (t * 1.5 + i as f32).sin() * 10.0;
+            v.rect(RIGHT_X + 6.0 + drift.max(0.0), y, PANEL_W - 12.0 - drift.abs(), queue_h / 6.0, hex(0x2a2f40));
+        }
+        v.text_centered("? ? ?", RIGHT_X + PANEL_W / 2.0, BOARD_Y + queue_h / 2.0, 34.0, hex(0x9aa3b8));
+    } else {
+        for (i, &kind) in game.next.iter().enumerate() {
+            draw_mini_piece(
+                &v,
+                kind,
+                RIGHT_X + PANEL_W / 2.0,
+                BOARD_Y + 45.0 + i as f32 * slot,
+                piece_color(kind),
+            );
+        }
     }
 
     if let Some(b) = battle {
@@ -363,13 +375,26 @@ fn draw_battle_panel(v: &View, b: &Battle) {
     v.rect(x, BOARD_Y, w, 300.0, hex(0x141824));
     v.outline(x, BOARD_Y, w, 300.0, 2.0, hex(0x262c3d));
     v.text_centered(m.name, cx, BOARD_Y + 40.0, 34.0, hex(m.color));
-    draw_monster(v, b, cx, BOARD_Y + 170.0);
+    draw_monster(v, b, cx, BOARD_Y + 150.0);
+    if let Some(ability) = m.ability {
+        let active = b.ability_in_effect();
+        let pulse = 0.6 + 0.4 * (get_time() as f32 * 8.0).sin().abs();
+        let color = if active { with_alpha(hex(0xff4f6d), pulse) } else { hex(0x7fd8ff) };
+        let label = if active { format!("{}!", ability.name()) } else { ability.name().to_owned() };
+        v.text_centered(&label, cx, BOARD_Y + 262.0, 24.0, color);
+        v.text_centered(ability.description(), cx, BOARD_Y + 286.0, 18.0, hex(0x5d6680));
+    }
 
     // HP.
     let hp_y = BOARD_Y + 320.0;
     v.text("HP", x, hp_y + 18.0, 22.0, muted);
     bar(v, x + 44.0, hp_y, w - 44.0, 24.0, b.hp as f32 / m.max_hp as f32, hex(0x5cdb5c));
     v.text_centered(&format!("{} / {}", b.hp, m.max_hp), x + 44.0 + (w - 44.0) / 2.0, hp_y + 18.0, 20.0, WHITE);
+    if b.shield > 0 {
+        let frac = b.shield as f32 / m.max_hp as f32;
+        bar(v, x + 44.0, hp_y + 30.0, w - 44.0, 10.0, frac, hex(0x4f8bff));
+        v.text(&format!("shield {}", b.shield), x + 44.0, hp_y + 58.0, 18.0, hex(0x4f8bff));
+    }
 
     // Time left.
     let time_y = hp_y + 80.0;

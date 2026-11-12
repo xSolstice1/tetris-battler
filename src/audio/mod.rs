@@ -268,6 +268,7 @@ impl Audio {
                 self.play(|b| &b.monster_roar, 0.5)
             }
             BattleEvent::Defeated { .. } => self.play(|b| &b.victory, 0.7),
+            BattleEvent::AbilityStarted(_) => self.play(|b| &b.t_spin, 0.45),
             BattleEvent::Lost(Defeat::Timeout) => self.play(|b| &b.game_over, 0.7),
             // The field's own GameOver event already played the sting.
             BattleEvent::Lost(Defeat::ToppedOut) => {}

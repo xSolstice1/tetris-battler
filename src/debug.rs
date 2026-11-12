@@ -4,6 +4,7 @@
 //! F2  T-spin double: rotate cw once, soft drop to the bottom, rotate cw again
 //! F3  combo ladder: keep dropping pieces into the right column to chain combos
 //! F4  receive 3 garbage lines (they rise on your next lock that clears nothing)
+//! F5  (Battler) skip to the next monster
 
 use macroquad::prelude::*;
 
