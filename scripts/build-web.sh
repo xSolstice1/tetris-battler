@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the browser version into dist/web (index.html + JS loader + wasm).
-# Deploy that folder as static files, e.g.: vercel deploy dist/web
+# Vercel runs this on every push (see vercel.json); locally, serve dist/web with any static server.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -9,10 +9,9 @@ out=dist/web
 
 cargo build --release --target wasm32-unknown-unknown
 
+rm -rf "$out"
 mkdir -p "$out"
-# Clear old build output but keep the Vercel project link (.vercel/).
-find "$out" -mindepth 1 -maxdepth 1 ! -name .vercel -exec rm -rf {} +
-cp web/index.html web/mq_js_bundle.js web/vercel.json "$out/"
+cp web/index.html web/mq_js_bundle.js "$out/"
 cp "$target_dir/wasm32-unknown-unknown/release/block-brawl.wasm" "$out/"
 
 echo "Built $out:"

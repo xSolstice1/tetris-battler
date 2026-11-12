@@ -412,7 +412,12 @@ fn draw_battle_panel(v: &View, b: &Battle) {
     let fighting = b.phase == Phase::Fighting;
     bar(v, x + 90.0, atk_y, w - 90.0, 24.0, if fighting { charge } else { 0.0 }, hex(0xff9a3c));
     v.text(
-        &format!("{} rows every {:.1}s", m.attack_lines, m.attack_every),
+        &format!(
+            "{} row{} every {:.1}s",
+            m.attack_lines,
+            if m.attack_lines == 1 { "" } else { "s" },
+            m.attack_every
+        ),
         x,
         atk_y + 50.0,
         18.0,
