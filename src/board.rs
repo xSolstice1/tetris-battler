@@ -54,23 +54,34 @@ impl Board {
         }
     }
 
-    /// Removes full rows, shifts everything above down, returns how many were cleared.
-    pub fn clear_full_rows(&mut self) -> usize {
-        let before = self.rows.len();
-        self.rows.retain(|row| row.iter().any(Option::is_none));
-        let cleared = before - self.rows.len();
-        for _ in 0..cleared {
+    pub fn row(&self, y: usize) -> Row {
+        self.rows[y]
+    }
+
+    /// Indices of completely filled rows, top to bottom.
+    pub fn full_rows(&self) -> Vec<usize> {
+        (0..TOTAL_ROWS)
+            .filter(|&y| self.rows[y].iter().all(Option::is_some))
+            .collect()
+    }
+
+    /// Removes the given rows (ascending order) and shifts everything above them down.
+    pub fn remove_rows(&mut self, ys: &[usize]) {
+        for &y in ys.iter().rev() {
+            self.rows.remove(y);
+        }
+        for _ in ys {
             self.rows.insert(0, [None; WIDTH]);
         }
-        cleared
     }
 
     pub fn is_empty(&self) -> bool {
         self.rows.iter().flatten().all(Option::is_none)
     }
 
-    #[cfg(test)]
-    pub fn set_for_test(&mut self, x: usize, y: usize, kind: PieceKind) {
+    /// Direct cell write for tests and debug board presets.
+    #[cfg(any(test, debug_assertions))]
+    pub fn set(&mut self, x: usize, y: usize, kind: PieceKind) {
         self.rows[y][x] = Some(kind);
     }
 }
@@ -84,14 +95,34 @@ mod tests {
         let mut b = Board::new();
         let bottom = TOTAL_ROWS - 1;
         for x in 0..WIDTH {
-            b.rows[bottom][x] = Some(PieceKind::I);
+            b.set(x, bottom, PieceKind::I);
         }
-        b.rows[bottom - 1][0] = Some(PieceKind::T);
+        b.set(0, bottom - 1, PieceKind::T);
 
-        assert_eq!(b.clear_full_rows(), 1);
+        let full = b.full_rows();
+        assert_eq!(full, vec![bottom]);
+        b.remove_rows(&full);
         assert_eq!(b.get(0, bottom), Some(PieceKind::T));
         assert_eq!(b.get(1, bottom), None);
         assert_eq!(b.rows.len(), TOTAL_ROWS);
+    }
+
+    #[test]
+    fn removes_non_adjacent_rows() {
+        let mut b = Board::new();
+        let bottom = TOTAL_ROWS - 1;
+        for x in 0..WIDTH {
+            b.set(x, bottom, PieceKind::I);
+            b.set(x, bottom - 2, PieceKind::I);
+        }
+        b.set(3, bottom - 1, PieceKind::S); // survives between the two full rows
+        b.set(5, bottom - 3, PieceKind::Z); // survives above both
+
+        let full = b.full_rows();
+        assert_eq!(full, vec![bottom - 2, bottom]);
+        b.remove_rows(&full);
+        assert_eq!(b.get(3, bottom), Some(PieceKind::S));
+        assert_eq!(b.get(5, bottom - 1), Some(PieceKind::Z));
     }
 
     #[test]

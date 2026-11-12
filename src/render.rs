@@ -4,22 +4,23 @@
 use macroquad::prelude::*;
 
 use crate::board::{HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
-use crate::game::{ClearEvent, Game};
+use crate::fx::Fx;
+use crate::game::Game;
 use crate::piece::PieceKind;
 
 const VIRTUAL_W: f32 = 760.0;
 const VIRTUAL_H: f32 = 760.0;
-const CELL: f32 = 32.0;
+pub const CELL: f32 = 32.0;
 const MINI: f32 = 20.0;
-const BOARD_X: f32 = 220.0;
-const BOARD_Y: f32 = 80.0;
-const BOARD_W: f32 = WIDTH as f32 * CELL;
+pub const BOARD_X: f32 = 220.0;
+pub const BOARD_Y: f32 = 80.0;
+pub const BOARD_W: f32 = WIDTH as f32 * CELL;
 const BOARD_H: f32 = VISIBLE_ROWS as f32 * CELL;
 const LEFT_X: f32 = 40.0;
 const RIGHT_X: f32 = BOARD_X + BOARD_W + 30.0;
 const PANEL_W: f32 = 150.0;
 
-fn hex(rgb: u32) -> Color {
+pub fn hex(rgb: u32) -> Color {
     Color::from_rgba((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
 }
 
@@ -31,7 +32,7 @@ fn shade(c: Color, f: f32) -> Color {
     Color::new(c.r * f, c.g * f, c.b * f, c.a)
 }
 
-fn piece_color(kind: PieceKind) -> Color {
+pub fn piece_color(kind: PieceKind) -> Color {
     match kind {
         PieceKind::I => hex(0x2ee6d6),
         PieceKind::O => hex(0xffd23f),
@@ -43,24 +44,24 @@ fn piece_color(kind: PieceKind) -> Color {
     }
 }
 
-/// Maps virtual coordinates to screen pixels.
-struct View {
+/// Maps virtual coordinates to screen pixels, plus a shake offset (virtual px).
+pub struct View {
     scale: f32,
     ox: f32,
     oy: f32,
 }
 
 impl View {
-    fn fit_window() -> Self {
+    fn fit_window(shake: Vec2) -> Self {
         let scale = (screen_width() / VIRTUAL_W).min(screen_height() / VIRTUAL_H);
         View {
             scale,
-            ox: (screen_width() - VIRTUAL_W * scale) / 2.0,
-            oy: (screen_height() - VIRTUAL_H * scale) / 2.0,
+            ox: (screen_width() - VIRTUAL_W * scale) / 2.0 + shake.x * scale,
+            oy: (screen_height() - VIRTUAL_H * scale) / 2.0 + shake.y * scale,
         }
     }
 
-    fn rect(&self, x: f32, y: f32, w: f32, h: f32, c: Color) {
+    pub fn rect(&self, x: f32, y: f32, w: f32, h: f32, c: Color) {
         let s = self.scale;
         draw_rectangle(self.ox + x * s, self.oy + y * s, w * s, h * s, c);
     }
@@ -75,21 +76,21 @@ impl View {
         draw_text(t, self.ox + x * s, self.oy + y * s, size * s, c);
     }
 
-    fn text_centered(&self, t: &str, cx: f32, y: f32, size: f32, c: Color) {
+    pub fn text_centered(&self, t: &str, cx: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
-        let dims = measure_text(t, None, (size * s) as u16, 1.0);
+        let dims = measure_text(t, None, (size * s).max(1.0) as u16, 1.0);
         draw_text(t, self.ox + cx * s - dims.width / 2.0, self.oy + y * s, size * s, c);
     }
 
-    fn block(&self, x: f32, y: f32, size: f32, c: Color) {
+    pub fn block(&self, x: f32, y: f32, size: f32, c: Color) {
         self.rect(x, y, size, size, shade(c, 0.55));
         self.rect(x + 2.0, y + 2.0, size - 4.0, size - 4.0, c);
         self.rect(x + 2.0, y + 2.0, size - 4.0, (size - 4.0) * 0.22, shade(c, 1.25));
     }
 }
 
-/// Screen position of board cell (x, y). Row `HIDDEN_ROWS` is the top visible row.
-fn cell_pos(x: i32, y: i32) -> (f32, f32) {
+/// Virtual position of board cell (x, y). Row `HIDDEN_ROWS` is the top visible row.
+pub fn cell_pos(x: i32, y: i32) -> (f32, f32) {
     (
         BOARD_X + x as f32 * CELL,
         BOARD_Y + (y - HIDDEN_ROWS as i32) as f32 * CELL,
@@ -123,46 +124,20 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
     v.outline(x, y, w, h, 2.0, hex(0x262c3d));
 }
 
-/// Short-lived callout for line clears ("T-SPIN DOUBLE", "COMBO 3", ...).
-#[derive(Default)]
-pub struct Popup {
-    lines: Vec<String>,
-    timer: f32,
-}
-
-impl Popup {
-    pub fn show(&mut self, e: &ClearEvent) {
-        const NAMES: [&str; 5] = ["", "SINGLE", "DOUBLE", "TRIPLE", "QUAD"];
-        let mut main = String::new();
-        if e.back_to_back {
-            main.push_str("B2B ");
-        }
-        if e.t_spin {
-            main.push_str("T-SPIN ");
-        }
-        main.push_str(NAMES[e.lines.min(4) as usize]);
-        self.lines = vec![main.trim().to_owned()];
-        if e.combo > 0 {
-            self.lines.push(format!("COMBO {}", e.combo));
-        }
-        if e.perfect_clear {
-            self.lines.push("PERFECT CLEAR".to_owned());
-        }
-        self.timer = 1.5;
-    }
-
-    pub fn update(&mut self, dt: f32) {
-        self.timer = (self.timer - dt).max(0.0);
-    }
-}
-
-pub fn draw(game: &Game, paused: bool, popup: &Popup) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx) {
     clear_background(hex(0x0b0d14));
-    let v = View::fit_window();
+    let v = View::fit_window(fx.shake_offset());
+    let field_bg = hex(0x10131c);
 
-    // Field.
-    v.rect(BOARD_X - 4.0, BOARD_Y - 4.0, BOARD_W + 8.0, BOARD_H + 8.0, hex(0x262c3d));
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, hex(0x10131c));
+    // Field frame (flashes with the last clear's colour) and background.
+    v.rect(
+        BOARD_X - 4.0,
+        BOARD_Y - 4.0,
+        BOARD_W + 8.0,
+        BOARD_H + 8.0,
+        fx.border_color(hex(0x262c3d)),
+    );
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, field_bg);
     let grid = hex(0x181c28);
     for x in 1..WIDTH {
         v.rect(BOARD_X + x as f32 * CELL, BOARD_Y, 1.0, BOARD_H, grid);
@@ -171,15 +146,19 @@ pub fn draw(game: &Game, paused: bool, popup: &Popup) {
         v.rect(BOARD_X, BOARD_Y + y as f32 * CELL, BOARD_W, 1.0, grid);
     }
 
+    // Settled stack, offset while it collapses after a clear.
     for y in HIDDEN_ROWS - 1..TOTAL_ROWS {
+        let offset = fx.row_offset(y);
         for x in 0..WIDTH {
             if let Some(kind) = game.board.get(x, y) {
                 let (px, py) = cell_pos(x as i32, y as i32);
                 let c = if game.game_over { hex(0x4a5064) } else { piece_color(kind) };
-                v.block(px, py, CELL, c);
+                v.block(px, py + offset, CELL, c);
             }
         }
     }
+
+    fx.draw_field(&v);
 
     if !game.game_over {
         let a = game.active;
@@ -192,10 +171,13 @@ pub fn draw(game: &Game, paused: bool, popup: &Popup) {
                 v.outline(px + 2.0, py + 2.0, CELL - 4.0, CELL - 4.0, 2.0, with_alpha(color, 0.5));
             }
         }
-        for (cx, cy) in a.kind.cells(a.rot) {
-            if drawable_row(a.y + cy) {
-                let (px, py) = cell_pos(a.x + cx, a.y + cy);
-                v.block(px, py, CELL, color);
+        // Dims as the lock delay runs out, so "about to stick" is readable.
+        let lock = game.lock_progress();
+        let active_color = shade(color, 1.0 - 0.45 * lock);
+        for (x, y) in a.cells() {
+            if drawable_row(y) {
+                let (px, py) = cell_pos(x, y);
+                v.block(px, py, CELL, active_color);
             }
         }
     }
@@ -247,20 +229,7 @@ pub fn draw(game: &Game, paused: bool, popup: &Popup) {
         );
     }
 
-    // Clear callout.
-    if popup.timer > 0.0 {
-        let alpha = popup.timer.min(1.0);
-        for (i, line) in popup.lines.iter().enumerate() {
-            let size = if i == 0 { 38.0 } else { 28.0 };
-            v.text_centered(
-                line,
-                BOARD_X + BOARD_W / 2.0,
-                BOARD_Y + 220.0 + i as f32 * 40.0,
-                size,
-                with_alpha(hex(0xffffff), alpha),
-            );
-        }
-    }
+    fx.draw_top(&v);
 
     // Overlays.
     let overlay = |title: &str, subtitle: &str| {

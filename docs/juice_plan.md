@@ -116,7 +116,7 @@ a rumble; KO explodes the loser's board.
 
 | Phase | Scope | Done when |
 |-------|-------|-----------|
-| 1 | `Event` enum + `Fx` skeleton + particles/tween/shake + line-clear dissolve + collapse + hard drop + lock flash + callout pop | Clearing a quad looks good with no added input latency |
+| 1 ✅ | `Event` enum + `Fx` skeleton + particles/tween/shake + line-clear dissolve + collapse + hard drop + lock flash + callout pop | Clearing a quad looks good with no added input latency |
 | 2 | Procedural audio, combo pitch ladder | Every action has a sound; combos audibly climb |
 | 3 | Perfect clear, level up, combo heat, danger, T-spin tell, hit-stop | Big plays clearly feel bigger than small ones |
 | 4 | Spawn/rotation/hold/queue tweens, game over sequence, background | Nothing on screen "teleports" |

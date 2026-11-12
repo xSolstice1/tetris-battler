@@ -1,5 +1,8 @@
 mod bag;
 mod board;
+#[cfg(debug_assertions)]
+mod debug;
+mod fx;
 mod game;
 mod input;
 mod piece;
@@ -7,9 +10,9 @@ mod render;
 
 use macroquad::prelude::*;
 
+use fx::Fx;
 use game::Game;
 use input::Input;
-use render::Popup;
 
 fn window_conf() -> Conf {
     Conf {
@@ -28,9 +31,12 @@ fn new_seed() -> u64 {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // Effects randomness only; the game has its own seeded RNG.
+    macroquad::rand::srand(new_seed());
+
     let mut game = Game::new(new_seed());
     let mut input = Input::default();
-    let mut popup = Popup::default();
+    let mut fx = Fx::default();
     let mut paused = false;
 
     loop {
@@ -41,25 +47,30 @@ async fn main() {
             if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
                 game = Game::new(new_seed());
                 input.reset();
-                popup = Popup::default();
+                fx = Fx::default();
             }
         } else if is_key_pressed(KeyCode::P) || is_key_pressed(KeyCode::Escape) {
             paused = !paused;
             input.reset();
         }
 
-        if !paused && !game.game_over {
-            for action in input.poll(dt) {
-                game.apply(action);
-            }
-            game.tick(dt);
-            for event in game.take_events() {
-                popup.show(&event);
-            }
-        }
-        popup.update(dt);
+        if !paused {
+            #[cfg(debug_assertions)]
+            debug::handle_keys(&mut game);
 
-        render::draw(&game, paused, &popup);
+            if !game.game_over {
+                for action in input.poll(dt) {
+                    game.apply(action);
+                }
+                game.tick(dt);
+            }
+            for event in game.take_events() {
+                fx.handle(&event);
+            }
+            fx.update(dt);
+        }
+
+        render::draw(&game, paused, &fx);
         next_frame().await;
     }
 }

@@ -1,11 +1,14 @@
 //! Rules for a single player's field: movement, rotation, gravity, lock delay,
 //! hold, preview queue, line clears and scoring. No rendering or input here, so
 //! it's unit-testable and can later be driven by a bot or the network.
+//!
+//! Everything noteworthy that happens is pushed as an [`Event`]; the effects layer
+//! (and later audio and the battle layer) consume those. Logic never waits on them.
 
 use std::collections::VecDeque;
 
 use crate::bag::Bag;
-use crate::board::{Board, HIDDEN_ROWS};
+use crate::board::{Board, HIDDEN_ROWS, Row};
 use crate::piece::PieceKind;
 
 pub const NEXT_PREVIEW: usize = 5;
@@ -34,15 +37,46 @@ pub struct Active {
     pub y: i32,
 }
 
-/// Emitted on every line clear (and on zero-line T-spins). The battle layer will
-/// turn these into garbage; for now they drive the on-screen callouts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ClearEvent {
-    pub lines: u32,
+impl Active {
+    /// Absolute board cells occupied by this piece.
+    pub fn cells(&self) -> [(i32, i32); 4] {
+        self.kind
+            .cells(self.rot)
+            .map(|(cx, cy)| (self.x + cx, self.y + cy))
+    }
+}
+
+/// A line clear (or a zero-line T-spin). `rows` are pre-clear board indices,
+/// top to bottom, and `snapshot` holds what those rows contained.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineClear {
+    pub rows: Vec<usize>,
+    pub snapshot: Vec<Row>,
     pub t_spin: bool,
     pub back_to_back: bool,
     pub combo: u32,
     pub perfect_clear: bool,
+}
+
+impl LineClear {
+    pub fn lines(&self) -> u32 {
+        self.rows.len() as u32
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    Moved,
+    Rotated,
+    SoftDropped,
+    /// Emitted before the matching `Locked`. `piece` is the position before the drop.
+    HardDropped { piece: Active, distance: i32 },
+    Locked { piece: Active },
+    LinesCleared(LineClear),
+    Held,
+    Spawned,
+    LevelUp { level: u32 },
+    GameOver,
 }
 
 pub struct Game {
@@ -63,7 +97,7 @@ pub struct Game {
     lock_resets: u32,
     lowest_y: i32,
     last_move_was_rotation: bool,
-    events: Vec<ClearEvent>,
+    events: Vec<Event>,
 }
 
 /// Seconds per row at a given level (guideline curve), capped at level 20.
@@ -111,15 +145,16 @@ impl Game {
             return;
         }
         match action {
-            Action::MoveLeft => {
-                self.try_move(-1, 0);
-            }
-            Action::MoveRight => {
-                self.try_move(1, 0);
+            Action::MoveLeft | Action::MoveRight => {
+                let dx = if action == Action::MoveLeft { -1 } else { 1 };
+                if self.try_move(dx, 0) {
+                    self.events.push(Event::Moved);
+                }
             }
             Action::SoftDrop => {
                 if self.try_move(0, 1) {
                     self.score += 1;
+                    self.events.push(Event::SoftDropped);
                 }
             }
             Action::HardDrop => self.hard_drop(),
@@ -163,8 +198,26 @@ impl Game {
         y
     }
 
-    pub fn take_events(&mut self) -> Vec<ClearEvent> {
+    /// 0.0 while airborne, rising to 1.0 as the lock delay runs out.
+    pub fn lock_progress(&self) -> f32 {
+        if self.game_over || !self.grounded() {
+            0.0
+        } else {
+            (self.lock_timer / LOCK_DELAY).min(1.0)
+        }
+    }
+
+    pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Replaces the field and active piece. Debug presets only.
+    #[cfg(debug_assertions)]
+    pub fn load_preset(&mut self, board: Board, kind: PieceKind) {
+        self.board = board;
+        self.hold_used = false;
+        self.game_over = false;
+        self.spawn(kind);
     }
 
     fn grounded(&self) -> bool {
@@ -197,6 +250,7 @@ impl Game {
                 };
                 self.last_move_was_rotation = true;
                 self.after_move();
+                self.events.push(Event::Rotated);
                 return;
             }
         }
@@ -216,13 +270,18 @@ impl Game {
     }
 
     fn hard_drop(&mut self) {
+        let start = self.active;
         let target = self.ghost_y();
-        let distance = target - self.active.y;
+        let distance = target - start.y;
         if distance > 0 {
             self.active.y = target;
             self.last_move_was_rotation = false;
         }
         self.score += 2 * distance as u64;
+        self.events.push(Event::HardDropped {
+            piece: start,
+            distance,
+        });
         self.lock();
     }
 
@@ -235,6 +294,7 @@ impl Game {
             Some(held) => held,
             None => self.pop_next(),
         };
+        self.events.push(Event::Held);
         self.spawn(kind);
         self.hold_used = true;
     }
@@ -258,9 +318,16 @@ impl Game {
         self.lowest_y = SPAWN_Y;
         self.last_move_was_rotation = false;
         // Block out: no room to spawn.
-        if !self.board.fits(kind, 0, SPAWN_X, SPAWN_Y) {
-            self.game_over = true;
+        if self.board.fits(kind, 0, SPAWN_X, SPAWN_Y) {
+            self.events.push(Event::Spawned);
+        } else {
+            self.end_game();
         }
+    }
+
+    fn end_game(&mut self) {
+        self.game_over = true;
+        self.events.push(Event::GameOver);
     }
 
     /// 3-corner rule: a T whose last move was a rotation, with 3 of the 4
@@ -278,29 +345,29 @@ impl Game {
     }
 
     fn lock(&mut self) {
-        let a = self.active;
+        let piece = self.active;
         let t_spin = self.is_t_spin();
-        self.board.place(a.kind, a.rot, a.x, a.y);
+        self.board.place(piece.kind, piece.rot, piece.x, piece.y);
+        self.events.push(Event::Locked { piece });
 
         // Lock out: the whole piece came to rest above the visible field.
-        let fully_hidden = a
-            .kind
-            .cells(a.rot)
-            .iter()
-            .all(|&(_, cy)| a.y + cy < HIDDEN_ROWS as i32);
-        if fully_hidden {
-            self.game_over = true;
+        if piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32) {
+            self.end_game();
             return;
         }
 
-        let cleared = self.board.clear_full_rows() as u32;
-        self.score_clear(cleared, t_spin);
+        let rows = self.board.full_rows();
+        let snapshot = rows.iter().map(|&y| self.board.row(y)).collect();
+        self.board.remove_rows(&rows);
+        self.score_clear(rows, snapshot, t_spin);
+
         self.hold_used = false;
         let kind = self.pop_next();
         self.spawn(kind);
     }
 
-    fn score_clear(&mut self, cleared: u32, t_spin: bool) {
+    fn score_clear(&mut self, rows: Vec<usize>, snapshot: Vec<Row>, t_spin: bool) {
+        let cleared = rows.len() as u32;
         let level = self.level as u64;
         let base: u64 = match (t_spin, cleared) {
             (false, 0) => 0,
@@ -318,13 +385,14 @@ impl Game {
             self.combo = -1;
             self.score += base * level;
             if t_spin {
-                self.events.push(ClearEvent {
-                    lines: 0,
+                self.events.push(Event::LinesCleared(LineClear {
+                    rows,
+                    snapshot,
                     t_spin,
                     back_to_back: false,
                     combo: 0,
                     perfect_clear: false,
-                });
+                }));
             }
             return;
         }
@@ -341,16 +409,21 @@ impl Game {
         points += 50 * self.combo as u64 * level;
         self.score += points;
 
-        self.lines += cleared;
-        self.level = self.lines / 10 + 1;
-
-        self.events.push(ClearEvent {
-            lines: cleared,
+        self.events.push(Event::LinesCleared(LineClear {
+            rows,
+            snapshot,
             t_spin,
             back_to_back,
             combo: self.combo as u32,
             perfect_clear: self.board.is_empty(),
-        });
+        }));
+
+        self.lines += cleared;
+        let new_level = self.lines / 10 + 1;
+        if new_level > self.level {
+            self.level = new_level;
+            self.events.push(Event::LevelUp { level: new_level });
+        }
     }
 }
 
@@ -362,7 +435,27 @@ mod tests {
     fn game_with(kind: PieceKind) -> Game {
         let mut g = Game::new(1);
         g.spawn(kind);
+        g.take_events();
         g
+    }
+
+    fn clears(events: &[Event]) -> Vec<&LineClear> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::LinesCleared(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Vertical I in the rightmost column, hard-dropped.
+    fn drop_i_into_right_well(g: &mut Game) {
+        g.apply(Action::RotateCw);
+        for _ in 0..10 {
+            g.apply(Action::MoveRight);
+        }
+        g.apply(Action::HardDrop);
     }
 
     #[test]
@@ -373,6 +466,23 @@ mod tests {
         assert_eq!(g.active.kind, expected_next);
         assert_eq!(g.next.len(), NEXT_PREVIEW);
         assert!(!g.board.is_empty());
+    }
+
+    #[test]
+    fn hard_drop_reports_start_and_distance_before_locking() {
+        let mut g = game_with(PieceKind::O);
+        let start = g.active;
+        let landing = g.ghost_y();
+        g.apply(Action::HardDrop);
+        let events = g.take_events();
+        assert_eq!(
+            events[0],
+            Event::HardDropped {
+                piece: start,
+                distance: landing - start.y
+            }
+        );
+        assert!(matches!(events[1], Event::Locked { .. }));
     }
 
     #[test]
@@ -404,24 +514,72 @@ mod tests {
     }
 
     #[test]
-    fn tetromino_quad_scores_and_clears() {
+    fn quad_clear_reports_rows_snapshot_and_perfect_clear() {
         let mut g = game_with(PieceKind::I);
-        // Bottom 4 rows full except the rightmost column.
         for y in TOTAL_ROWS - 4..TOTAL_ROWS {
             for x in 0..WIDTH - 1 {
-                g.board.set_for_test(x, y, PieceKind::J);
+                g.board.set(x, y, PieceKind::J);
             }
         }
-        g.apply(Action::RotateCw);
-        for _ in 0..10 {
-            g.apply(Action::MoveRight);
-        }
-        g.apply(Action::HardDrop);
+        drop_i_into_right_well(&mut g);
+
         assert_eq!(g.lines, 4);
         let events = g.take_events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].lines, 4);
-        assert!(events[0].perfect_clear);
+        let c = clears(&events);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].rows, (TOTAL_ROWS - 4..TOTAL_ROWS).collect::<Vec<_>>());
+        assert_eq!(c[0].snapshot[0][0], Some(PieceKind::J));
+        assert_eq!(c[0].snapshot[0][WIDTH - 1], Some(PieceKind::I));
+        assert!(c[0].perfect_clear);
+    }
+
+    #[test]
+    fn non_adjacent_clear_reports_both_rows() {
+        let mut g = game_with(PieceKind::I);
+        let bottom = TOTAL_ROWS - 1;
+        // Rows bottom and bottom-2 need only column 9; rows in between need more.
+        for x in 0..WIDTH - 1 {
+            g.board.set(x, bottom, PieceKind::J);
+            g.board.set(x, bottom - 2, PieceKind::J);
+        }
+        g.board.set(0, bottom - 1, PieceKind::S);
+        g.board.set(0, bottom - 3, PieceKind::S);
+        drop_i_into_right_well(&mut g);
+
+        let events = g.take_events();
+        let c = clears(&events);
+        assert_eq!(c[0].rows, vec![bottom - 2, bottom]);
+        assert!(!c[0].perfect_clear);
+    }
+
+    #[test]
+    fn level_up_fires_once_when_crossing_ten_lines() {
+        let mut g = game_with(PieceKind::I);
+        g.lines = 8;
+        for y in TOTAL_ROWS - 4..TOTAL_ROWS {
+            for x in 0..WIDTH - 1 {
+                g.board.set(x, y, PieceKind::J);
+            }
+        }
+        drop_i_into_right_well(&mut g);
+
+        let level_ups: Vec<_> = g
+            .take_events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::LevelUp { .. }))
+            .collect();
+        assert_eq!(level_ups, vec![Event::LevelUp { level: 2 }]);
+    }
+
+    #[test]
+    fn lock_progress_rises_only_while_grounded() {
+        let mut g = game_with(PieceKind::O);
+        assert_eq!(g.lock_progress(), 0.0);
+        while !g.grounded() {
+            g.apply(Action::SoftDrop);
+        }
+        g.tick(LOCK_DELAY / 2.0);
+        assert!((g.lock_progress() - 0.5).abs() < 1e-4);
     }
 
     #[test]
