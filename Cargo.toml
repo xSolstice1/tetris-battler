@@ -1,0 +1,12 @@
+[package]
+name = "block-brawl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Audio needs ALSA dev headers on Linux: sudo apt install libasound2-dev
+macroquad = { version = "0.4", features = ["audio"] }
+
+# Optimise dependencies even in debug builds so the game runs smoothly while iterating.
+[profile.dev.package."*"]
+opt-level = 3
