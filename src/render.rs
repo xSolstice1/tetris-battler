@@ -582,7 +582,64 @@ pub struct MenuItem {
     pub blurb: &'static str,
 }
 
-pub fn draw_menu(items: &[MenuItem], selected: usize, sound_on: bool, motion: Motion) {
+// Menu layout, shared by drawing and mouse hit-testing (virtual coordinates).
+const MENU_ITEM_W: f32 = 420.0;
+const MENU_ITEM_H: f32 = 64.0;
+const MENU_ITEM_GAP: f32 = 18.0;
+const MENU_TOP: f32 = 270.0;
+const TOGGLE_W: f32 = 200.0;
+const TOGGLE_H: f32 = 40.0;
+const TOGGLE_GAP: f32 = 20.0;
+
+/// Something clickable on the main menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuHit {
+    Item(usize),
+    Motion,
+    Sound,
+}
+
+fn menu_item_rect(i: usize) -> Rect {
+    Rect::new(
+        CLASSIC_W / 2.0 - MENU_ITEM_W / 2.0,
+        MENU_TOP + i as f32 * (MENU_ITEM_H + MENU_ITEM_GAP),
+        MENU_ITEM_W,
+        MENU_ITEM_H,
+    )
+}
+
+/// The blurb sits under the items; the toggles sit under the blurb.
+fn menu_toggle_rect(items: usize, which: MenuHit) -> Rect {
+    let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 60.0;
+    let left = CLASSIC_W / 2.0 - TOGGLE_W - TOGGLE_GAP / 2.0;
+    let x = if which == MenuHit::Motion { left } else { left + TOGGLE_W + TOGGLE_GAP };
+    Rect::new(x, y, TOGGLE_W, TOGGLE_H)
+}
+
+impl View {
+    /// Screen pixels -> virtual coordinates.
+    fn to_virtual(&self, p: Vec2) -> Vec2 {
+        vec2((p.x - self.ox) / self.scale, (p.y - self.oy) / self.scale)
+    }
+}
+
+/// What, if anything, is under `screen_pos` (e.g. `mouse_position()`) on a menu
+/// with `items` entries.
+pub fn menu_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
+    let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
+    (0..items)
+        .map(MenuHit::Item)
+        .chain([MenuHit::Motion, MenuHit::Sound])
+        .find(|&hit| {
+            let r = match hit {
+                MenuHit::Item(i) => menu_item_rect(i),
+                toggle => menu_toggle_rect(items, toggle),
+            };
+            r.contains(p)
+        })
+}
+
+pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, motion: Motion) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     let cx = CLASSIC_W / 2.0;
@@ -598,26 +655,58 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, sound_on: bool, motion: Mo
     v.text_centered("BRAWL", cx + 105.0, 170.0, 76.0, hex(0xff4f6d));
     v.text_centered("a falling-block battler", cx, 210.0, 22.0, hex(0x5d6680));
 
-    let (w, h, gap) = (420.0, 64.0, 18.0);
     for (i, item) in items.iter().enumerate() {
-        let x = cx - w / 2.0;
-        let y = 270.0 + i as f32 * (h + gap);
+        let r = menu_item_rect(i);
         let active = i == selected;
-        v.rect(x, y, w, h, if active { hex(0x1c2234) } else { hex(0x141824) });
-        v.outline(x, y, w, h, 2.0, if active { hex(0xffd23f) } else { hex(0x262c3d) });
+        v.rect(r.x, r.y, r.w, r.h, if active { hex(0x1c2234) } else { hex(0x141824) });
+        v.outline(r.x, r.y, r.w, r.h, 2.0, if active { hex(0xffd23f) } else { hex(0x262c3d) });
         let color = if active { WHITE } else { hex(0x9aa3b8) };
-        v.text_centered(item.title, cx, y + h / 2.0 + 12.0, 34.0, color);
+        v.text_centered(item.title, cx, r.y + r.h / 2.0 + 12.0, 34.0, color);
     }
     if let Some(item) = items.get(selected) {
-        let y = 270.0 + items.len() as f32 * (h + gap) + 20.0;
+        let y = menu_item_rect(items.len()).y + 20.0;
         v.text_centered(item.blurb, cx, y, 20.0, hex(0x9aa3b8));
     }
 
-    let footer = format!(
-        "Up/Down choose  ·  Enter play  ·  M motion: {}  ·  N sound: {}",
-        motion.label(),
-        if sound_on { "on" } else { "off" }
+    let toggles = [
+        (MenuHit::Motion, format!("MOTION: {}", motion.label())),
+        (MenuHit::Sound, format!("SOUND: {}", if sound_on { "on" } else { "off" })),
+    ];
+    for (which, label) in toggles {
+        let r = menu_toggle_rect(items.len(), which);
+        let hovered = hover == Some(which);
+        v.rect(r.x, r.y, r.w, r.h, if hovered { hex(0x1c2234) } else { hex(0x10131c) });
+        v.outline(r.x, r.y, r.w, r.h, 2.0, if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
+        let color = if hovered { WHITE } else { hex(0x9aa3b8) };
+        v.text_centered(&label, r.x + r.w / 2.0, r.y + r.h / 2.0 + 7.0, 20.0, color);
+    }
+
+    v.text_centered(
+        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / N toggle",
+        cx,
+        712.0,
+        18.0,
+        hex(0x5d6680),
     );
-    v.text_centered(&footer, cx, 712.0, 18.0, hex(0x5d6680));
     v.text_centered("made by xSolstice1  ·  github.com/xSolstice1", cx, 742.0, 16.0, hex(0x3d4458));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_targets_never_overlap_and_fit_the_canvas() {
+        for items in 1..=4 {
+            let mut rects: Vec<Rect> = (0..items).map(menu_item_rect).collect();
+            rects.push(menu_toggle_rect(items, MenuHit::Motion));
+            rects.push(menu_toggle_rect(items, MenuHit::Sound));
+            for (i, a) in rects.iter().enumerate() {
+                assert!(a.x >= 0.0 && a.right() <= CLASSIC_W && a.bottom() < 700.0, "{items} items: {a:?}");
+                for b in &rects[i + 1..] {
+                    assert!(!a.overlaps(b), "{items} items: {a:?} overlaps {b:?}");
+                }
+            }
+        }
+    }
 }

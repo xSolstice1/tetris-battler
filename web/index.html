@@ -18,7 +18,7 @@
 </head>
 <body>
   <canvas id="glcanvas" tabindex="1"></canvas>
-  <div id="hint">Click the game if keys don't respond. Sound starts after your first key press.</div>
+  <div id="hint">Click the game if keys don't respond. Sound starts after your first key press or click.</div>
   <noscript>Block Brawl needs JavaScript and WebAssembly.</noscript>
   <!-- The bundled (unused) networking plugin assigns this global without
        declaring it, which throws under the bundle's "use strict". -->
@@ -26,8 +26,10 @@
   <script src="mq_js_bundle.js"></script>
   <script>
     load("block-brawl.wasm");
-    // Hide the hint once the player has interacted.
-    addEventListener("keydown", () => document.getElementById("hint").remove(), { once: true });
+    // Hide the hint once the player has interacted (key or click).
+    const hideHint = () => document.getElementById("hint")?.remove();
+    addEventListener("keydown", hideHint, { once: true });
+    addEventListener("pointerdown", hideHint, { once: true });
   </script>
 </body>
 </html>
