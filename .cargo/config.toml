@@ -1,0 +1,5 @@
+# macroquad's audio (quad-snd) calls JS functions supplied by web/mq_js_bundle.js.
+# Newer rustc no longer passes --allow-undefined to the wasm linker by default,
+# so tell it those symbols are imports resolved by the browser.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]
