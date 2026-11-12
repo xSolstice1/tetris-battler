@@ -12,7 +12,7 @@ use std::f32::consts::TAU;
 use macroquad::prelude::*;
 use macroquad::rand::gen_range;
 
-use crate::board::{Row, TOTAL_ROWS, WIDTH};
+use crate::board::{Board, Row, TOTAL_ROWS, WIDTH};
 use crate::game::{Active, Event, LineClear};
 use crate::render::{self, BOARD_W, BOARD_X, BOARD_Y, CELL, View};
 use callouts::Callouts;
@@ -32,6 +32,79 @@ const COLLAPSE_TIME: f32 = 0.2;
 const TRAIL_TIME: f32 = 0.22;
 const LOCK_FLASH_TIME: f32 = 0.16;
 const BORDER_FLASH_TIME: f32 = 0.45;
+/// Hard-drop flight time: base + per row travelled, capped. Short enough to never
+/// feel like input lag (logic has already locked the piece), long enough to see.
+const DROP_BASE_TIME: f32 = 0.05;
+const DROP_TIME_PER_ROW: f32 = 0.0035;
+const DROP_MAX_TIME: f32 = 0.12;
+/// Motion-blur copies trail this far behind in drop progress.
+const DROP_BLUR_STEP: f32 = 0.12;
+/// How quickly the drawn active piece catches up with its logical row (1/s).
+/// ~30 ms time constant: glides between rows without feeling floaty.
+const ACTIVE_FOLLOW_RATE: f32 = 35.0;
+
+/// A hard-dropped piece still travelling down on screen. Events the game emitted
+/// after the drop (lock, clears, level up, ...) wait in `queued` until it lands,
+/// and `board` is the field as it was before the lock.
+struct Drop {
+    piece: Active,
+    distance: i32,
+    board: Board,
+    color: Color,
+    t: f32,
+    duration: f32,
+    queued: Vec<Event>,
+}
+
+impl Drop {
+    /// Ease-in: accelerates into the impact.
+    fn progress_at(&self, t: f32) -> f32 {
+        let p = (t / self.duration).clamp(0.0, 1.0);
+        p * p
+    }
+
+    /// Rows travelled so far (fractional).
+    fn rows_fallen_at(&self, t: f32) -> f32 {
+        self.progress_at(t) * self.distance as f32
+    }
+}
+
+/// Per-column trail extents: (column, top row before the drop, top row after landing).
+fn trail_columns(piece: &Active, distance: i32) -> Vec<(i32, i32, i32)> {
+    let mut columns: Vec<(i32, i32, i32)> = Vec::new();
+    for (x, y) in piece.cells() {
+        match columns.iter_mut().find(|c| c.0 == x) {
+            Some(c) => {
+                c.1 = c.1.min(y);
+                c.2 = c.2.min(y + distance);
+            }
+            None => columns.push((x, y, y + distance)),
+        }
+    }
+    columns
+}
+
+/// Vertical light streak from `y0` down to `y1` (virtual px), brighter and wider at the bottom.
+fn draw_streak(v: &View, x: i32, y0: f32, y1: f32, color: Color, fade: f32) {
+    if y1 <= y0 {
+        return;
+    }
+    const SLICES: usize = 10;
+    let (px, _) = render::cell_pos(x, 0);
+    let h = (y1 - y0) / SLICES as f32;
+    let tint = mix(color, WHITE, 0.4);
+    for i in 0..SLICES {
+        let f = (i + 1) as f32 / SLICES as f32;
+        let w = (CELL - 10.0) * (0.4 + 0.6 * f);
+        v.rect(
+            px + (CELL - w) / 2.0,
+            y0 + h * i as f32,
+            w,
+            h + 0.5,
+            Color { a: f * 0.45 * fade, ..tint },
+        );
+    }
+}
 
 struct ClearingRow {
     y: usize,
@@ -73,6 +146,11 @@ pub struct Fx {
     trails: Vec<Trail>,
     flashes: Vec<LockFlash>,
     border: Option<(Color, f32)>,
+    drop: Option<Drop>,
+    /// Drawn row of the active piece, easing toward the logical row.
+    active_y: Option<f32>,
+    /// Set when a new piece appears, so it doesn't glide in from the old one.
+    snap_active: bool,
     time: f32,
 }
 
@@ -131,8 +209,53 @@ fn burst_cell(particles: &mut Particles, x: i32, y: i32, color: Color, big: bool
 
 impl Fx {
     pub fn handle(&mut self, event: &Event) {
+        // The next piece is already live even while the last one is still falling
+        // on screen, so snapping must not wait in the drop queue.
+        if matches!(event, Event::Spawned | Event::Held) {
+            self.snap_active = true;
+        }
+
+        if let Event::HardDropped {
+            piece,
+            distance,
+            board,
+        } = event
+        {
+            self.land(); // a new drop finishes any still in flight
+            if *distance > 0 {
+                let d = *distance as f32;
+                self.drop = Some(Drop {
+                    piece: *piece,
+                    distance: *distance,
+                    board: board.clone(),
+                    color: render::piece_color(piece.kind),
+                    t: 0.0,
+                    duration: (DROP_BASE_TIME + d * DROP_TIME_PER_ROW).min(DROP_MAX_TIME),
+                    queued: Vec::new(),
+                });
+            }
+            return;
+        }
+
+        match &mut self.drop {
+            Some(drop) => drop.queued.push(event.clone()),
+            None => self.apply(event),
+        }
+    }
+
+    /// Ends an in-flight hard drop: impact effects, then everything that was queued.
+    fn land(&mut self) {
+        let Some(drop) = self.drop.take() else {
+            return;
+        };
+        self.impact(&drop);
+        for event in &drop.queued {
+            self.apply(event);
+        }
+    }
+
+    fn apply(&mut self, event: &Event) {
         match event {
-            Event::HardDropped { piece, distance } => self.hard_drop(*piece, *distance),
             Event::Locked { piece } => self.flashes.push(LockFlash {
                 cells: piece.cells(),
                 t: 0.0,
@@ -144,28 +267,23 @@ impl Fx {
                 self.border = Some((gold, BORDER_FLASH_TIME));
             }
             Event::GameOver => self.shake.add(0.6),
-            Event::Moved | Event::Rotated | Event::SoftDropped | Event::Held | Event::Spawned => {}
+            Event::HardDropped { .. }
+            | Event::Moved
+            | Event::Rotated
+            | Event::SoftDropped
+            | Event::Held
+            | Event::Spawned => {}
         }
     }
 
-    fn hard_drop(&mut self, piece: Active, distance: i32) {
-        if distance <= 0 {
-            return;
-        }
-        let color = render::piece_color(piece.kind);
+    fn impact(&mut self, drop: &Drop) {
+        let (piece, distance, color) = (drop.piece, drop.distance, drop.color);
         let cells = piece.cells();
-
-        let mut columns: Vec<(i32, i32, i32)> = Vec::new();
-        for &(x, y) in &cells {
-            match columns.iter_mut().find(|c| c.0 == x) {
-                Some(c) => {
-                    c.1 = c.1.min(y);
-                    c.2 = c.2.min(y + distance);
-                }
-                None => columns.push((x, y, y + distance)),
-            }
-        }
-        self.trails.push(Trail { columns, color, t: 0.0 });
+        self.trails.push(Trail {
+            columns: trail_columns(&piece, distance),
+            color,
+            t: 0.0,
+        });
 
         // Dust puffs from under each cell that hit something.
         let dust = mix(color, WHITE, 0.6);
@@ -259,6 +377,13 @@ impl Fx {
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
 
+        if let Some(drop) = &mut self.drop {
+            drop.t += dt;
+            if drop.t >= drop.duration {
+                self.land();
+            }
+        }
+
         for anim in &mut self.clears {
             anim.t += dt;
             for row in &mut anim.rows {
@@ -303,6 +428,35 @@ impl Fx {
         self.callouts.update(dt);
     }
 
+    /// Eases the drawn row of the active piece toward `logical_y`. Call once per frame
+    /// after handling that frame's events.
+    pub fn follow_active(&mut self, logical_y: i32, dt: f32) {
+        let target = logical_y as f32;
+        match &mut self.active_y {
+            Some(y) if !self.snap_active => {
+                *y += (target - *y) * (1.0 - (-ACTIVE_FOLLOW_RATE * dt).exp());
+                if (target - *y).abs() < 0.01 {
+                    *y = target;
+                }
+            }
+            _ => {
+                self.active_y = Some(target);
+                self.snap_active = false;
+            }
+        }
+    }
+
+    /// Vertical pixel offset of the drawn active piece from its logical row.
+    pub fn active_offset(&self, logical_y: i32) -> f32 {
+        self.active_y.map_or(0.0, |y| (y - logical_y as f32) * CELL)
+    }
+
+    /// While a hard drop is still falling on screen, the field as it was before the
+    /// lock; the renderer should draw this instead of the live board.
+    pub fn frozen_board(&self) -> Option<&Board> {
+        self.drop.as_ref().map(|d| &d.board)
+    }
+
     pub fn shake_offset(&self) -> Vec2 {
         self.shake.offset()
     }
@@ -327,28 +481,33 @@ impl Fx {
 
     /// Effects that sit on the field, under the active piece.
     pub fn draw_field(&self, v: &View) {
+        // Landed trails fade out where the piece came from.
         for trail in &self.trails {
             let fade = 1.0 - trail.t / TRAIL_TIME;
             for &(x, top, landing) in &trail.columns {
-                let (px, y0) = render::cell_pos(x, top);
+                let (_, y0) = render::cell_pos(x, top);
                 let (_, y1) = render::cell_pos(x, landing);
-                if y1 <= y0 {
-                    continue;
+                draw_streak(v, x, y0, y1, trail.color, fade);
+            }
+        }
+
+        // In-flight hard drop: streak grows behind the falling piece, with blur copies.
+        if let Some(drop) = &self.drop {
+            let fallen = drop.rows_fallen_at(drop.t) * CELL;
+            for &(x, top, _) in &trail_columns(&drop.piece, drop.distance) {
+                let (_, y0) = render::cell_pos(x, top);
+                draw_streak(v, x, y0, y0 + fallen, drop.color, 1.0);
+            }
+            for (k, alpha) in [(3.0, 0.12), (2.0, 0.2), (1.0, 0.32)] {
+                let lag = drop.rows_fallen_at(drop.t - k * DROP_BLUR_STEP * drop.duration) * CELL;
+                for (x, y) in drop.piece.cells() {
+                    let (px, py) = render::cell_pos(x, y);
+                    v.rect(px + 2.0, py + lag + 2.0, CELL - 4.0, CELL - 4.0, Color { a: alpha, ..drop.color });
                 }
-                // Brighter and wider toward the landing point.
-                const SLICES: usize = 10;
-                let h = (y1 - y0) / SLICES as f32;
-                for i in 0..SLICES {
-                    let f = (i + 1) as f32 / SLICES as f32;
-                    let w = (CELL - 10.0) * (0.4 + 0.6 * f);
-                    v.rect(
-                        px + (CELL - w) / 2.0,
-                        y0 + h * i as f32,
-                        w,
-                        h + 0.5,
-                        Color { a: f * 0.45 * fade, ..mix(trail.color, WHITE, 0.4) },
-                    );
-                }
+            }
+            for (x, y) in drop.piece.cells() {
+                let (px, py) = render::cell_pos(x, y);
+                v.block(px, py + fallen, CELL, drop.color);
             }
         }
 
@@ -404,6 +563,69 @@ mod tests {
         assert_eq!(shift[bottom], 1, "old bottom-1 lands on the bottom row");
         assert_eq!(shift[bottom - 1], 2, "old bottom-3 lands two rows lower");
         assert_eq!(shift[10], 2);
+    }
+
+    #[test]
+    fn hard_drop_holds_follow_up_events_until_it_lands() {
+        use crate::piece::PieceKind;
+        let mut fx = Fx::default();
+        let piece = Active {
+            kind: PieceKind::O,
+            rot: 0,
+            x: 3,
+            y: 19,
+        };
+        let board = Board::new();
+        fx.handle(&Event::HardDropped {
+            piece,
+            distance: 18,
+            board: board.clone(),
+        });
+        fx.handle(&Event::Locked {
+            piece: Active { y: 37, ..piece },
+        });
+        assert_eq!(fx.frozen_board(), Some(&board));
+        assert!(fx.flashes.is_empty(), "lock flash waits for the landing");
+
+        fx.update(DROP_MAX_TIME + 0.01);
+        assert_eq!(fx.frozen_board(), None);
+        assert_eq!(fx.flashes.len(), 1);
+        assert_eq!(fx.trails.len(), 1);
+    }
+
+    #[test]
+    fn second_hard_drop_lands_the_first_immediately() {
+        use crate::piece::PieceKind;
+        let mut fx = Fx::default();
+        let piece = Active {
+            kind: PieceKind::T,
+            rot: 0,
+            x: 3,
+            y: 19,
+        };
+        let drop = |board| Event::HardDropped {
+            piece,
+            distance: 10,
+            board,
+        };
+        fx.handle(&drop(Board::new()));
+        fx.handle(&Event::Locked { piece });
+        fx.handle(&drop(Board::new()));
+        assert_eq!(fx.flashes.len(), 1, "first drop's lock applied on interrupt");
+        assert!(fx.frozen_board().is_some(), "second drop now in flight");
+    }
+
+    #[test]
+    fn active_piece_glides_but_snaps_on_spawn() {
+        let mut fx = Fx::default();
+        fx.follow_active(20, 0.016);
+        fx.follow_active(21, 0.016);
+        let offset = fx.active_offset(21);
+        assert!(offset < 0.0 && offset > -CELL, "partway between rows: {offset}");
+
+        fx.handle(&Event::Spawned);
+        fx.follow_active(19, 0.016);
+        assert_eq!(fx.active_offset(19), 0.0);
     }
 
     #[test]

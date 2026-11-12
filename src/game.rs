@@ -69,8 +69,14 @@ pub enum Event {
     Moved,
     Rotated,
     SoftDropped,
-    /// Emitted before the matching `Locked`. `piece` is the position before the drop.
-    HardDropped { piece: Active, distance: i32 },
+    /// Emitted before the matching `Locked`. `piece` is the position before the drop
+    /// and `board` the field before the piece locked, so the effects layer can show
+    /// the piece travelling down before the logic's result (lock, clears) appears.
+    HardDropped {
+        piece: Active,
+        distance: i32,
+        board: Board,
+    },
     Locked { piece: Active },
     LinesCleared(LineClear),
     Held,
@@ -281,6 +287,7 @@ impl Game {
         self.events.push(Event::HardDropped {
             piece: start,
             distance,
+            board: self.board.clone(),
         });
         self.lock();
     }
@@ -473,13 +480,15 @@ mod tests {
         let mut g = game_with(PieceKind::O);
         let start = g.active;
         let landing = g.ghost_y();
+        let board_before = g.board.clone();
         g.apply(Action::HardDrop);
         let events = g.take_events();
         assert_eq!(
             events[0],
             Event::HardDropped {
                 piece: start,
-                distance: landing - start.y
+                distance: landing - start.y,
+                board: board_before,
             }
         );
         assert!(matches!(events[1], Event::Locked { .. }));

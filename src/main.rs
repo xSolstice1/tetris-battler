@@ -67,6 +67,7 @@ async fn main() {
             for event in game.take_events() {
                 fx.handle(&event);
             }
+            fx.follow_active(game.active.y, dt);
             fx.update(dt);
         }
 

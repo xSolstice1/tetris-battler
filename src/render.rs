@@ -146,11 +146,13 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx) {
         v.rect(BOARD_X, BOARD_Y + y as f32 * CELL, BOARD_W, 1.0, grid);
     }
 
-    // Settled stack, offset while it collapses after a clear.
+    // Settled stack, offset while it collapses after a clear. During a hard drop's
+    // flight, show the field as it was before the lock.
+    let board = fx.frozen_board().unwrap_or(&game.board);
     for y in HIDDEN_ROWS - 1..TOTAL_ROWS {
         let offset = fx.row_offset(y);
         for x in 0..WIDTH {
-            if let Some(kind) = game.board.get(x, y) {
+            if let Some(kind) = board.get(x, y) {
                 let (px, py) = cell_pos(x as i32, y as i32);
                 let c = if game.game_over { hex(0x4a5064) } else { piece_color(kind) };
                 v.block(px, py + offset, CELL, c);
@@ -174,10 +176,11 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx) {
         // Dims as the lock delay runs out, so "about to stick" is readable.
         let lock = game.lock_progress();
         let active_color = shade(color, 1.0 - 0.45 * lock);
+        let glide = fx.active_offset(a.y);
         for (x, y) in a.cells() {
             if drawable_row(y) {
                 let (px, py) = cell_pos(x, y);
-                v.block(px, py, CELL, active_color);
+                v.block(px, py + glide, CELL, active_color);
             }
         }
     }

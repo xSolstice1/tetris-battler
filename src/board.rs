@@ -10,7 +10,7 @@ pub const HIDDEN_ROWS: usize = TOTAL_ROWS - VISIBLE_ROWS;
 
 pub type Row = [Option<PieceKind>; WIDTH];
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Board {
     rows: Vec<Row>,
 }
