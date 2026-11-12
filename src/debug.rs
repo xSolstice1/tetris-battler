@@ -3,6 +3,7 @@
 //! F1  quad + perfect clear: rotate, hard drop into the right column
 //! F2  T-spin double: rotate cw once, soft drop to the bottom, rotate cw again
 //! F3  combo ladder: keep dropping pieces into the right column to chain combos
+//! F4  receive 3 garbage lines (they rise on your next lock that clears nothing)
 
 use macroquad::prelude::*;
 
@@ -48,6 +49,9 @@ fn combo_ladder() -> Board {
 }
 
 pub fn handle_keys(game: &mut Game) {
+    if is_key_pressed(KeyCode::F4) {
+        game.receive_garbage(3);
+    }
     let preset = if is_key_pressed(KeyCode::F1) {
         Some((quad_perfect_clear(), PieceKind::I))
     } else if is_key_pressed(KeyCode::F2) {

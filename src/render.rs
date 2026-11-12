@@ -3,7 +3,7 @@
 
 use macroquad::prelude::*;
 
-use crate::board::{HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
+use crate::board::{Cell, HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
 use crate::fx::Fx;
 use crate::game::Game;
 use crate::piece::PieceKind;
@@ -30,6 +30,13 @@ fn with_alpha(c: Color, a: f32) -> Color {
 
 fn shade(c: Color, f: f32) -> Color {
     Color::new(c.r * f, c.g * f, c.b * f, c.a)
+}
+
+pub fn cell_color(cell: Cell) -> Color {
+    match cell {
+        Cell::Piece(kind) => piece_color(kind),
+        Cell::Garbage => hex(0x5a6275),
+    }
 }
 
 pub fn piece_color(kind: PieceKind) -> Color {
@@ -152,15 +159,25 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool) {
     for y in HIDDEN_ROWS - 1..TOTAL_ROWS {
         let offset = fx.row_offset(y);
         for x in 0..WIDTH {
-            if let Some(kind) = board.get(x, y) {
+            if let Some(cell) = board.get(x, y) {
                 let (px, py) = cell_pos(x as i32, y as i32);
-                let c = if game.game_over { hex(0x4a5064) } else { piece_color(kind) };
+                let c = if game.game_over { hex(0x4a5064) } else { cell_color(cell) };
                 v.block(px, py + offset, CELL, c);
             }
         }
     }
 
     fx.draw_field(&v);
+
+    // Incoming garbage meter, left of the field: one cell per queued line.
+    let pending = game.pending_garbage();
+    if pending > 0 {
+        let rows = pending.min(VISIBLE_ROWS as u32) as f32;
+        let h = rows * CELL;
+        let danger = pending >= 4;
+        let pulse = if danger { 0.75 + 0.25 * (get_time() as f32 * 12.0).sin() } else { 1.0 };
+        v.rect(BOARD_X - 14.0, BOARD_Y + BOARD_H - h, 8.0, h, with_alpha(hex(0xff4f6d), pulse));
+    }
 
     if !game.game_over {
         let a = game.active;

@@ -7,8 +7,8 @@
 
 use std::collections::VecDeque;
 
-use crate::bag::Bag;
-use crate::board::{Board, HIDDEN_ROWS, Row};
+use crate::bag::{Bag, Rng};
+use crate::board::{Board, HIDDEN_ROWS, Row, WIDTH};
 use crate::piece::PieceKind;
 
 pub const NEXT_PREVIEW: usize = 5;
@@ -17,6 +17,44 @@ const MAX_LOCK_RESETS: u32 = 15;
 const SPAWN_X: i32 = 3;
 /// Box top sits one row above the visible field, so the piece's lower row starts visible.
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
+
+/// Garbage lines sent per clear, indexed by lines cleared.
+const LINE_ATTACK: [u32; 5] = [0, 0, 1, 2, 4];
+/// T-spin attack, indexed by lines cleared (zero-line T-spins send nothing).
+const T_SPIN_ATTACK: [u32; 4] = [0, 2, 4, 6];
+/// Bonus by combo count (0 = first clear of a chain); the last entry repeats.
+const COMBO_ATTACK: [u32; 12] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5];
+const BACK_TO_BACK_ATTACK: u32 = 1;
+const PERFECT_CLEAR_ATTACK: u32 = 10;
+/// At most this many garbage rows rise per lock; the rest wait for the next one.
+const MAX_GARBAGE_PER_LOCK: u32 = 8;
+
+/// Attack value of a clear, before it cancels any incoming garbage.
+pub fn attack_for(lines: u32, t_spin: bool, back_to_back: bool, combo: u32, perfect_clear: bool) -> u32 {
+    if lines == 0 {
+        return 0;
+    }
+    let base = if t_spin {
+        T_SPIN_ATTACK[lines.min(3) as usize]
+    } else {
+        LINE_ATTACK[lines.min(4) as usize]
+    };
+    let mut attack = base + COMBO_ATTACK[(combo as usize).min(COMBO_ATTACK.len() - 1)];
+    if back_to_back {
+        attack += BACK_TO_BACK_ATTACK;
+    }
+    if perfect_clear {
+        attack += PERFECT_CLEAR_ATTACK;
+    }
+    attack
+}
+
+/// A chunk of incoming garbage: rows share one hole column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Garbage {
+    lines: u32,
+    hole: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -56,6 +94,10 @@ pub struct LineClear {
     pub back_to_back: bool,
     pub combo: u32,
     pub perfect_clear: bool,
+    /// Attack value of this clear (garbage lines), before cancelling.
+    pub attack: u32,
+    /// How much of `attack` went into cancelling incoming garbage.
+    pub cancelled: u32,
 }
 
 impl LineClear {
@@ -82,6 +124,10 @@ pub enum Event {
     Held,
     Spawned,
     LevelUp { level: u32 },
+    /// Garbage was queued against this player; it rises on their next non-clearing lock.
+    GarbageIncoming { lines: u32 },
+    /// Queued garbage just pushed the stack up.
+    GarbageRose { lines: u32 },
     GameOver,
 }
 
@@ -95,7 +141,13 @@ pub struct Game {
     pub lines: u32,
     pub level: u32,
     pub game_over: bool,
+    /// Multiplies gravity speed (battle abilities use this). 1.0 = normal.
+    pub gravity_scale: f32,
     bag: Bag,
+    pending_garbage: VecDeque<Garbage>,
+    garbage_rng: Rng,
+    /// Level rises with lines cleared unless a mode has fixed it via `set_level`.
+    auto_level: bool,
     combo: i32,
     back_to_back: bool,
     gravity_acc: f32,
@@ -132,7 +184,11 @@ impl Game {
             lines: 0,
             level: 1,
             game_over: false,
+            gravity_scale: 1.0,
             bag,
+            pending_garbage: VecDeque::new(),
+            garbage_rng: Rng::new(seed.rotate_left(17) ^ 0x6A4B_A6E5),
+            auto_level: true,
             combo: -1,
             back_to_back: false,
             gravity_acc: 0.0,
@@ -183,7 +239,7 @@ impl Game {
             }
         } else {
             self.gravity_acc += dt;
-            let step = gravity_interval(self.level);
+            let step = gravity_interval(self.level) / self.gravity_scale.max(0.01);
             while self.gravity_acc >= step {
                 self.gravity_acc -= step;
                 if !self.try_move(0, 1) {
@@ -215,6 +271,33 @@ impl Game {
 
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Queues garbage against this player. It rises on their next lock that
+    /// doesn't clear lines, unless their clears cancel it first.
+    pub fn receive_garbage(&mut self, lines: u32) {
+        if lines == 0 || self.game_over {
+            return;
+        }
+        let hole = self.garbage_rng.below(WIDTH);
+        self.pending_garbage.push_back(Garbage { lines, hole });
+        self.events.push(Event::GarbageIncoming { lines });
+    }
+
+    /// Total garbage lines waiting to rise.
+    pub fn pending_garbage(&self) -> u32 {
+        self.pending_garbage.iter().map(|g| g.lines).sum()
+    }
+
+    /// Drops all incoming garbage (e.g. between battle opponents).
+    pub fn clear_pending_garbage(&mut self) {
+        self.pending_garbage.clear();
+    }
+
+    /// Fixes the level (gravity) and stops it rising with lines cleared.
+    pub fn set_level(&mut self, level: u32) {
+        self.auto_level = false;
+        self.level = level.max(1);
     }
 
     /// Replaces the field and active piece. Debug presets only.
@@ -365,13 +448,61 @@ impl Game {
         }
 
         let rows = self.board.full_rows();
+        let cleared = rows.len();
         let snapshot = rows.iter().map(|&y| self.board.row(y)).collect();
         self.board.remove_rows(&rows);
         self.score_clear(rows, snapshot, t_spin);
 
+        // Garbage only rises when the lock didn't clear anything.
+        if cleared == 0 && !self.raise_garbage() {
+            self.end_game();
+            return;
+        }
+
         self.hold_used = false;
         let kind = self.pop_next();
         self.spawn(kind);
+    }
+
+    /// Raises up to `MAX_GARBAGE_PER_LOCK` queued rows. False if that topped the player out.
+    fn raise_garbage(&mut self) -> bool {
+        let mut budget = MAX_GARBAGE_PER_LOCK;
+        let mut raised = 0;
+        let mut fits = true;
+        while budget > 0 {
+            let Some(chunk) = self.pending_garbage.front_mut() else {
+                break;
+            };
+            let n = chunk.lines.min(budget);
+            fits &= self.board.push_garbage(n as usize, chunk.hole);
+            chunk.lines -= n;
+            budget -= n;
+            raised += n;
+            if chunk.lines == 0 {
+                self.pending_garbage.pop_front();
+            }
+        }
+        if raised > 0 {
+            self.events.push(Event::GarbageRose { lines: raised });
+        }
+        fits
+    }
+
+    /// Spends `attack` cancelling queued garbage, oldest first. Returns the amount used.
+    fn cancel_garbage(&mut self, attack: u32) -> u32 {
+        let mut left = attack;
+        while left > 0 {
+            let Some(chunk) = self.pending_garbage.front_mut() else {
+                break;
+            };
+            let n = chunk.lines.min(left);
+            chunk.lines -= n;
+            left -= n;
+            if chunk.lines == 0 {
+                self.pending_garbage.pop_front();
+            }
+        }
+        attack - left
     }
 
     fn score_clear(&mut self, rows: Vec<usize>, snapshot: Vec<Row>, t_spin: bool) {
@@ -400,6 +531,8 @@ impl Game {
                     back_to_back: false,
                     combo: 0,
                     perfect_clear: false,
+                    attack: 0,
+                    cancelled: 0,
                 }));
             }
             return;
@@ -417,18 +550,24 @@ impl Game {
         points += 50 * self.combo as u64 * level;
         self.score += points;
 
+        let combo = self.combo as u32;
+        let perfect_clear = self.board.is_empty();
+        let attack = attack_for(cleared, t_spin, back_to_back, combo, perfect_clear);
+        let cancelled = self.cancel_garbage(attack);
         self.events.push(Event::LinesCleared(LineClear {
             rows,
             snapshot,
             t_spin,
             back_to_back,
-            combo: self.combo as u32,
-            perfect_clear: self.board.is_empty(),
+            combo,
+            perfect_clear,
+            attack,
+            cancelled,
         }));
 
         self.lines += cleared;
         let new_level = self.lines / 10 + 1;
-        if new_level > self.level {
+        if self.auto_level && new_level > self.level {
             self.level = new_level;
             self.events.push(Event::LevelUp { level: new_level });
         }
@@ -438,7 +577,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{TOTAL_ROWS, WIDTH};
+    use crate::board::{Cell, TOTAL_ROWS};
 
     fn game_with(kind: PieceKind) -> Game {
         let mut g = Game::new(1);
@@ -538,9 +677,10 @@ mod tests {
         let c = clears(&events);
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].rows, (TOTAL_ROWS - 4..TOTAL_ROWS).collect::<Vec<_>>());
-        assert_eq!(c[0].snapshot[0][0], Some(PieceKind::J));
-        assert_eq!(c[0].snapshot[0][WIDTH - 1], Some(PieceKind::I));
+        assert_eq!(c[0].snapshot[0][0], Some(Cell::Piece(PieceKind::J)));
+        assert_eq!(c[0].snapshot[0][WIDTH - 1], Some(Cell::Piece(PieceKind::I)));
         assert!(c[0].perfect_clear);
+        assert_eq!(c[0].attack, 4 + PERFECT_CLEAR_ATTACK);
     }
 
     #[test]
@@ -590,6 +730,83 @@ mod tests {
         }
         g.tick(LOCK_DELAY / 2.0);
         assert!((g.lock_progress() - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn attack_table() {
+        assert_eq!(attack_for(1, false, false, 0, false), 0);
+        assert_eq!(attack_for(2, false, false, 0, false), 1);
+        assert_eq!(attack_for(4, false, false, 0, false), 4);
+        assert_eq!(attack_for(2, true, false, 0, false), 4, "T-spin double");
+        assert_eq!(attack_for(4, false, true, 0, false), 5, "back-to-back quad");
+        assert_eq!(attack_for(1, false, false, 5, false), 2, "combo bonus");
+        assert_eq!(attack_for(1, false, false, 99, false), 5, "combo bonus caps");
+        assert_eq!(attack_for(0, true, false, 0, false), 0, "zero-line T-spin");
+    }
+
+    #[test]
+    fn garbage_rises_on_a_lock_that_clears_nothing() {
+        let mut g = game_with(PieceKind::O);
+        g.receive_garbage(3);
+        assert_eq!(g.pending_garbage(), 3);
+        g.apply(Action::HardDrop);
+        assert_eq!(g.pending_garbage(), 0);
+        let bottom = TOTAL_ROWS - 1;
+        let garbage_cells = (0..WIDTH).filter(|&x| g.board.get(x, bottom) == Some(Cell::Garbage)).count();
+        assert_eq!(garbage_cells, WIDTH - 1, "one hole per row");
+        assert!(g.take_events().contains(&Event::GarbageRose { lines: 3 }));
+    }
+
+    #[test]
+    fn clears_cancel_garbage_before_it_rises() {
+        let mut g = game_with(PieceKind::I);
+        for y in TOTAL_ROWS - 4..TOTAL_ROWS {
+            for x in 0..WIDTH - 1 {
+                g.board.set(x, y, PieceKind::J);
+            }
+        }
+        g.receive_garbage(2);
+        g.receive_garbage(20);
+        drop_i_into_right_well(&mut g); // quad + perfect clear = 14 attack
+        let c = clears(&g.take_events())[0].clone();
+        assert_eq!((c.attack, c.cancelled), (14, 14));
+        assert_eq!(g.pending_garbage(), 8);
+        assert!(g.board.is_empty(), "a clearing lock raises nothing");
+    }
+
+    #[test]
+    fn garbage_rises_at_most_eight_per_lock() {
+        let mut g = game_with(PieceKind::O);
+        g.receive_garbage(12);
+        g.apply(Action::HardDrop);
+        assert_eq!(g.pending_garbage(), 4);
+    }
+
+    #[test]
+    fn garbage_can_top_out() {
+        let mut g = game_with(PieceKind::O);
+        g.receive_garbage(TOTAL_ROWS as u32);
+        for _ in 0..10 {
+            if g.game_over {
+                break;
+            }
+            g.apply(Action::HardDrop);
+        }
+        assert!(g.game_over);
+    }
+
+    #[test]
+    fn fixed_level_ignores_lines() {
+        let mut g = game_with(PieceKind::I);
+        g.set_level(7);
+        g.lines = 9;
+        for y in TOTAL_ROWS - 4..TOTAL_ROWS {
+            for x in 0..WIDTH - 1 {
+                g.board.set(x, y, PieceKind::J);
+            }
+        }
+        drop_i_into_right_well(&mut g);
+        assert_eq!(g.level, 7);
     }
 
     #[test]

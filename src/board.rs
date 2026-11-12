@@ -8,7 +8,14 @@ pub const VISIBLE_ROWS: usize = 20;
 pub const TOTAL_ROWS: usize = 40;
 pub const HIDDEN_ROWS: usize = TOTAL_ROWS - VISIBLE_ROWS;
 
-pub type Row = [Option<PieceKind>; WIDTH];
+/// What occupies a cell: part of a locked piece, or a garbage block sent by an opponent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Cell {
+    Piece(PieceKind),
+    Garbage,
+}
+
+pub type Row = [Option<Cell>; WIDTH];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Board {
@@ -28,7 +35,7 @@ impl Board {
         }
     }
 
-    pub fn get(&self, x: usize, y: usize) -> Option<PieceKind> {
+    pub fn get(&self, x: usize, y: usize) -> Option<Cell> {
         self.rows[y][x]
     }
 
@@ -50,7 +57,7 @@ impl Board {
     /// Writes a piece into the grid. Caller must have checked `fits`.
     pub fn place(&mut self, kind: PieceKind, rot: u8, x: i32, y: i32) {
         for (cx, cy) in kind.cells(rot) {
-            self.rows[(y + cy) as usize][(x + cx) as usize] = Some(kind);
+            self.rows[(y + cy) as usize][(x + cx) as usize] = Some(Cell::Piece(kind));
         }
     }
 
@@ -79,10 +86,26 @@ impl Board {
         self.rows.iter().flatten().all(Option::is_none)
     }
 
+    /// Pushes `lines` garbage rows (solid except column `hole`) up from the bottom.
+    /// Returns false if that shoved any block off the top of the field (a top out).
+    pub fn push_garbage(&mut self, lines: usize, hole: usize) -> bool {
+        let mut fits = true;
+        let mut row = [Some(Cell::Garbage); WIDTH];
+        row[hole % WIDTH] = None;
+        for _ in 0..lines {
+            if self.rows[0].iter().any(Option::is_some) {
+                fits = false;
+            }
+            self.rows.remove(0);
+            self.rows.push(row);
+        }
+        fits
+    }
+
     /// Direct cell write for tests and debug board presets.
     #[cfg(any(test, debug_assertions))]
     pub fn set(&mut self, x: usize, y: usize, kind: PieceKind) {
-        self.rows[y][x] = Some(kind);
+        self.rows[y][x] = Some(Cell::Piece(kind));
     }
 }
 
@@ -102,7 +125,7 @@ mod tests {
         let full = b.full_rows();
         assert_eq!(full, vec![bottom]);
         b.remove_rows(&full);
-        assert_eq!(b.get(0, bottom), Some(PieceKind::T));
+        assert_eq!(b.get(0, bottom), Some(Cell::Piece(PieceKind::T)));
         assert_eq!(b.get(1, bottom), None);
         assert_eq!(b.rows.len(), TOTAL_ROWS);
     }
@@ -121,8 +144,29 @@ mod tests {
         let full = b.full_rows();
         assert_eq!(full, vec![bottom - 2, bottom]);
         b.remove_rows(&full);
-        assert_eq!(b.get(3, bottom), Some(PieceKind::S));
-        assert_eq!(b.get(5, bottom - 1), Some(PieceKind::Z));
+        assert_eq!(b.get(3, bottom), Some(Cell::Piece(PieceKind::S)));
+        assert_eq!(b.get(5, bottom - 1), Some(Cell::Piece(PieceKind::Z)));
+    }
+
+    #[test]
+    fn garbage_rises_from_the_bottom_with_a_hole() {
+        let mut b = Board::new();
+        let bottom = TOTAL_ROWS - 1;
+        b.set(2, bottom, PieceKind::O);
+        assert!(b.push_garbage(2, 7));
+        assert_eq!(b.get(2, bottom - 2), Some(Cell::Piece(PieceKind::O)), "stack pushed up");
+        for y in [bottom - 1, bottom] {
+            assert_eq!(b.get(7, y), None, "hole");
+            assert_eq!(b.get(0, y), Some(Cell::Garbage));
+        }
+        assert_eq!(b.rows.len(), TOTAL_ROWS);
+    }
+
+    #[test]
+    fn garbage_pushing_blocks_off_the_top_reports_top_out() {
+        let mut b = Board::new();
+        b.set(4, 0, PieceKind::I);
+        assert!(!b.push_garbage(1, 0));
     }
 
     #[test]

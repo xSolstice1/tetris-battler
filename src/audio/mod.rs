@@ -36,6 +36,8 @@ pub struct Bank<T> {
     perfect: T,
     level_up: T,
     game_over: T,
+    garbage_rise: T,
+    garbage_warn: T,
 }
 
 impl<T> Bank<T> {
@@ -56,6 +58,8 @@ impl<T> Bank<T> {
             perfect: f(self.perfect)?,
             level_up: f(self.level_up)?,
             game_over: f(self.game_over)?,
+            garbage_rise: f(self.garbage_rise)?,
+            garbage_warn: f(self.garbage_warn)?,
         })
     }
 }
@@ -152,6 +156,16 @@ pub fn synthesize() -> Bank<Vec<f32>> {
     let mut game_over = arpeggio(Wave::Triangle, C4, &[12, 7, 3, 0, -5], 0.14, 0.3, 5.0);
     mix(&mut game_over, &noise(&mut rng, 0.8, 300.0, 120.0, 3.0, 1.0), 0.0, 0.5);
 
+    let mut garbage_rise = noise(&mut rng, 0.3, 400.0, 120.0, 7.0, 1.0);
+    let mut grind = Voice::new(Wave::Square, 70.0, 0.25).sweep_to(55.0).decay(9.0).render();
+    lowpass(&mut grind, 500.0);
+    mix(&mut garbage_rise, &grind, 0.0, 0.5);
+
+    // Two-tone alarm blip when garbage is queued against you.
+    let mut garbage_warn = Voice::new(Wave::Square, 880.0, 0.06).decay(20.0).render();
+    mix(&mut garbage_warn, &Voice::new(Wave::Square, 660.0, 0.08).decay(20.0).render(), 0.07, 1.0);
+    lowpass(&mut garbage_warn, 2500.0);
+
     Bank {
         shift,
         rotate: finish(rotate),
@@ -165,6 +179,8 @@ pub fn synthesize() -> Bank<Vec<f32>> {
         perfect: finish(perfect),
         level_up: finish(level_up),
         game_over: finish(game_over),
+        garbage_rise: finish(garbage_rise),
+        garbage_warn: finish(garbage_warn),
     }
 }
 
@@ -242,6 +258,10 @@ impl Audio {
             }
             Event::LevelUp { .. } => self.play(|b| &b.level_up, 0.5),
             Event::GameOver => self.play(|b| &b.game_over, 0.7),
+            Event::GarbageIncoming { .. } => self.play(|b| &b.garbage_warn, 0.35),
+            Event::GarbageRose { lines } => {
+                self.play(|b| &b.garbage_rise, (0.4 + *lines as f32 * 0.08).min(0.9))
+            }
             Event::Spawned => {}
         }
     }
@@ -263,6 +283,8 @@ mod tests {
             &bank.perfect,
             &bank.level_up,
             &bank.game_over,
+            &bank.garbage_rise,
+            &bank.garbage_warn,
         ];
         v.extend(bank.clear.iter());
         v.extend(bank.combo.iter());

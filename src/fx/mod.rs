@@ -400,12 +400,18 @@ impl Fx {
                 self.border = Some((gold, BORDER_FLASH_TIME));
             }
             Event::GameOver => self.shake.add(0.6),
+            // The stack shoves up: a short upward jolt.
+            Event::GarbageRose { lines } => {
+                self.shake.add((0.06 + *lines as f32 * 0.03).min(0.3));
+                self.shake.kick(-(2.0 + *lines as f32).min(8.0));
+            }
             Event::HardDropped { .. }
             | Event::Moved
             | Event::Rotated
             | Event::SoftDropped
             | Event::Held
-            | Event::Spawned => {}
+            | Event::Spawned
+            | Event::GarbageIncoming { .. } => {}
         }
     }
 
@@ -521,8 +527,8 @@ impl Fx {
                     let delay = (x as f32 - (WIDTH as f32 - 1.0) / 2.0).abs().floor() * SWEEP_PER_COLUMN;
                     if !row.burst[x] && (force || anim.t >= delay) {
                         row.burst[x] = true;
-                        if let Some(kind) = row.cells[x] {
-                            let color = render::piece_color(kind);
+                        if let Some(cell) = row.cells[x] {
+                            let color = render::cell_color(cell);
                             burst_cell(&mut self.particles, x as i32, row.y as i32, color, anim.big);
                         }
                     }
@@ -673,8 +679,8 @@ impl Fx {
                     v.rect(x, py + (CELL - h) / 2.0, w, h, Color { a: beam_alpha, ..WHITE });
                 }
                 for x in 0..WIDTH {
-                    if let (false, Some(kind)) = (row.burst[x], row.cells[x]) {
-                        let c = mix(render::piece_color(kind), WHITE, anim.t / FLASH_IN);
+                    if let (false, Some(cell)) = (row.burst[x], row.cells[x]) {
+                        let c = mix(render::cell_color(cell), WHITE, anim.t / FLASH_IN);
                         v.block(BOARD_X + x as f32 * CELL, py, CELL, c);
                     }
                 }
@@ -784,11 +790,13 @@ mod tests {
     fn single_clear() -> Event {
         Event::LinesCleared(LineClear {
             rows: vec![TOTAL_ROWS - 1],
-            snapshot: vec![[Some(crate::piece::PieceKind::J); WIDTH]],
+            snapshot: vec![[Some(crate::board::Cell::Piece(crate::piece::PieceKind::J)); WIDTH]],
             t_spin: false,
             back_to_back: false,
             combo: 0,
             perfect_clear: false,
+            attack: 0,
+            cancelled: 0,
         })
     }
 
