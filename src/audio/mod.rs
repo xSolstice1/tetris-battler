@@ -8,6 +8,7 @@ mod synth;
 use macroquad::audio::{PlaySoundParams, Sound, load_sound_from_bytes, play_sound};
 
 use crate::bag::Rng;
+use crate::battle::{BattleEvent, Defeat};
 use crate::game::Event;
 use synth::{Voice, Wave, bell, encode_wav, lowpass, mix, noise, normalize, note};
 
@@ -38,6 +39,9 @@ pub struct Bank<T> {
     game_over: T,
     garbage_rise: T,
     garbage_warn: T,
+    monster_hit: T,
+    monster_roar: T,
+    victory: T,
 }
 
 impl<T> Bank<T> {
@@ -60,6 +64,9 @@ impl<T> Bank<T> {
             game_over: f(self.game_over)?,
             garbage_rise: f(self.garbage_rise)?,
             garbage_warn: f(self.garbage_warn)?,
+            monster_hit: f(self.monster_hit)?,
+            monster_roar: f(self.monster_roar)?,
+            victory: f(self.victory)?,
         })
     }
 }
@@ -166,6 +173,24 @@ pub fn synthesize() -> Bank<Vec<f32>> {
     mix(&mut garbage_warn, &Voice::new(Wave::Square, 660.0, 0.08).decay(20.0).render(), 0.07, 1.0);
     lowpass(&mut garbage_warn, 2500.0);
 
+    let mut monster_hit = noise(&mut rng, 0.12, 4000.0, 600.0, 22.0, 1.0);
+    let mut smack = Voice::new(Wave::Square, 320.0, 0.1).sweep_to(90.0).decay(30.0).render();
+    lowpass(&mut smack, 1800.0);
+    mix(&mut monster_hit, &smack, 0.0, 0.7);
+
+    let mut monster_roar = Voice::new(Wave::Saw, 130.0, 0.45)
+        .sweep_to(70.0)
+        .attack(0.04)
+        .vibrato(9.0, 0.06)
+        .decay(4.0)
+        .render();
+    lowpass(&mut monster_roar, 900.0);
+    mix(&mut monster_roar, &noise(&mut rng, 0.4, 700.0, 250.0, 5.0, 1.0), 0.0, 0.4);
+
+    let mut victory = arpeggio(Wave::Square, C5, &[0, 7, 12, 16, 19, 24], 0.06, 0.2, 9.0);
+    lowpass(&mut victory, 4500.0);
+    mix(&mut victory, &bell(note(C6, 7), 0.8, 0.6), 0.36, 1.0);
+
     Bank {
         shift,
         rotate: finish(rotate),
@@ -181,6 +206,9 @@ pub fn synthesize() -> Bank<Vec<f32>> {
         game_over: finish(game_over),
         garbage_rise: finish(garbage_rise),
         garbage_warn: finish(garbage_warn),
+        monster_hit: finish(monster_hit),
+        monster_roar: finish(monster_roar),
+        victory: finish(victory),
     }
 }
 
@@ -228,6 +256,21 @@ impl Audio {
                     volume: volume * MASTER_VOLUME,
                 },
             );
+        }
+    }
+
+    pub fn handle_battle(&self, event: &BattleEvent) {
+        match event {
+            BattleEvent::Hit { damage } => {
+                self.play(|b| &b.monster_hit, (0.35 + *damage as f32 * 0.03).min(0.8))
+            }
+            BattleEvent::MonsterAttack { .. } | BattleEvent::NewMonster { .. } => {
+                self.play(|b| &b.monster_roar, 0.5)
+            }
+            BattleEvent::Defeated { .. } => self.play(|b| &b.victory, 0.7),
+            BattleEvent::Lost(Defeat::Timeout) => self.play(|b| &b.game_over, 0.7),
+            // The field's own GameOver event already played the sting.
+            BattleEvent::Lost(Defeat::ToppedOut) => {}
         }
     }
 
@@ -285,6 +328,9 @@ mod tests {
             &bank.game_over,
             &bank.garbage_rise,
             &bank.garbage_warn,
+            &bank.monster_hit,
+            &bank.monster_roar,
+            &bank.victory,
         ];
         v.extend(bank.clear.iter());
         v.extend(bank.combo.iter());

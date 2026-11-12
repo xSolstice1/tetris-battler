@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod bag;
+mod battle;
 mod board;
 #[cfg(debug_assertions)]
 mod debug;
@@ -17,7 +18,7 @@ use app::App;
 fn window_conf() -> Conf {
     Conf {
         window_title: "Block Brawl".to_owned(),
-        window_width: 760,
+        window_width: 1100,
         window_height: 760,
         window_resizable: true,
         high_dpi: true,

@@ -4,11 +4,14 @@
 use macroquad::prelude::*;
 
 use crate::board::{Cell, HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
+use crate::battle::{self, Battle, Defeat, Phase};
 use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::piece::PieceKind;
 
-const VIRTUAL_W: f32 = 760.0;
+/// Virtual canvas width for Classic and the menu; Battler adds the monster panel.
+const CLASSIC_W: f32 = 760.0;
+const BATTLE_W: f32 = 1100.0;
 const VIRTUAL_H: f32 = 760.0;
 pub const CELL: f32 = 32.0;
 const MINI: f32 = 20.0;
@@ -59,11 +62,11 @@ pub struct View {
 }
 
 impl View {
-    fn fit_window(shake: Vec2) -> Self {
-        let scale = (screen_width() / VIRTUAL_W).min(screen_height() / VIRTUAL_H);
+    fn fit_window(shake: Vec2, virtual_w: f32) -> Self {
+        let scale = (screen_width() / virtual_w).min(screen_height() / VIRTUAL_H);
         View {
             scale,
-            ox: (screen_width() - VIRTUAL_W * scale) / 2.0 + shake.x * scale,
+            ox: (screen_width() - virtual_w * scale) / 2.0 + shake.x * scale,
             oy: (screen_height() - VIRTUAL_H * scale) / 2.0 + shake.y * scale,
         }
     }
@@ -131,9 +134,10 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
     v.outline(x, y, w, h, 2.0, hex(0x262c3d));
 }
 
-pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&Battle>) {
     clear_background(hex(0x0b0d14));
-    let v = View::fit_window(fx.shake_offset());
+    let width = if battle.is_some() { BATTLE_W } else { CLASSIC_W };
+    let v = View::fit_window(fx.shake_offset(), width);
     let field_bg = hex(0x10131c);
 
     // Field frame (flashes with the last clear's colour) and background.
@@ -257,19 +261,165 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool) {
         );
     }
 
+    if let Some(b) = battle {
+        draw_battle_panel(&v, b);
+        if let Phase::Intermission { .. } = b.phase {
+            let next = battle::monster(b.monster.tier + 1);
+            v.rect(BOARD_X, BOARD_Y + 250.0, BOARD_W, 120.0, Color::new(0.0, 0.0, 0.0, 0.6));
+            v.text_centered("DEFEATED!", BOARD_X + BOARD_W / 2.0, BOARD_Y + 305.0, 48.0, hex(0xffd23f));
+            v.text_centered(
+                &format!("next: {}", next.name),
+                BOARD_X + BOARD_W / 2.0,
+                BOARD_Y + 345.0,
+                22.0,
+                hex(0x9aa3b8),
+            );
+        }
+    }
+
     fx.draw_top(&v);
 
     // Overlays.
+    let field_cx = BOARD_X + BOARD_W / 2.0;
     let overlay = |title: &str, subtitle: &str| {
         v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.7));
-        v.text_centered(title, BOARD_X + BOARD_W / 2.0, BOARD_Y + BOARD_H / 2.0 - 10.0, 52.0, WHITE);
-        v.text_centered(subtitle, BOARD_X + BOARD_W / 2.0, BOARD_Y + BOARD_H / 2.0 + 30.0, 22.0, hex(0x9aa3b8));
+        v.text_centered(title, field_cx, BOARD_Y + BOARD_H / 2.0 - 10.0, 52.0, WHITE);
+        v.text_centered(subtitle, field_cx, BOARD_Y + BOARD_H / 2.0 + 30.0, 22.0, hex(0x9aa3b8));
     };
-    if game.game_over {
-        overlay("GAME OVER", "Enter retry   ·   Esc menu");
-    } else if paused {
-        overlay("PAUSED", "Esc resume   ·   Q menu");
+    match battle {
+        Some(b) if b.over() || game.game_over => draw_battle_results(&v, b),
+        _ if game.game_over => overlay("GAME OVER", "Enter retry   ·   Esc menu"),
+        _ if paused => overlay("PAUSED", "Esc resume   ·   Q menu"),
+        _ => {}
     }
+}
+
+const PANEL_X: f32 = RIGHT_X + PANEL_W + 30.0;
+const MONSTER_PANEL_W: f32 = 320.0;
+
+/// Horizontal bar: background, fill fraction, border.
+fn bar(v: &View, x: f32, y: f32, w: f32, h: f32, frac: f32, fill: Color) {
+    v.rect(x, y, w, h, hex(0x10131c));
+    v.rect(x, y, w * frac.clamp(0.0, 1.0), h, fill);
+    v.outline(x, y, w, h, 2.0, hex(0x262c3d));
+}
+
+fn draw_monster(v: &View, b: &Battle, cx: f32, cy: f32) {
+    const PIXEL: f32 = 20.0;
+    let t = get_time() as f32;
+    let fading = match b.phase {
+        Phase::Intermission { left } => left / battle::INTERMISSION,
+        Phase::Over(_) => 1.0,
+        Phase::Fighting => 1.0,
+    };
+    // Idle bob, plus a recoil shudder and white flash right after a hit.
+    let recent_hit = b.hits.last().map_or(1.0, |&(_, age)| age);
+    let flash = (1.0 - recent_hit / 0.15).max(0.0);
+    let shudder = if recent_hit < 0.2 { (t * 90.0).sin() * 5.0 * (1.0 - recent_hit / 0.2) } else { 0.0 };
+    let bob = (t * 2.2).sin() * 6.0;
+
+    let w = battle::SPRITE_W as f32 * PIXEL;
+    let h = battle::SPRITE_H as f32 * PIXEL;
+    let (x0, y0) = (cx - w / 2.0 + shudder, cy - h / 2.0 + bob);
+    let body = hex(b.monster.color);
+    let color = Color {
+        a: fading,
+        ..mix_colors(body, WHITE, flash)
+    };
+    for (y, row) in b.monster.sprite.iter().enumerate() {
+        for (x, &filled) in row.iter().enumerate() {
+            if filled {
+                v.block(x0 + x as f32 * PIXEL, y0 + y as f32 * PIXEL, PIXEL, color);
+            }
+        }
+    }
+    for (x, y) in battle::EYES {
+        let (ex, ey) = (x0 + x as f32 * PIXEL, y0 + y as f32 * PIXEL);
+        v.rect(ex + 3.0, ey + 3.0, PIXEL - 6.0, PIXEL - 6.0, Color { a: fading, ..WHITE });
+        v.rect(ex + 7.0, ey + 8.0, PIXEL - 13.0, PIXEL - 12.0, Color { a: fading, ..hex(0x10131c) });
+    }
+
+    // Damage numbers float up from the monster.
+    for &(damage, age) in &b.hits {
+        let k = age / battle::HIT_POPUP_TIME;
+        let alpha = 1.0 - k * k;
+        let size = 30.0 + damage.min(20) as f32;
+        v.text_centered(&format!("-{damage}"), cx + 70.0, cy - 40.0 - k * 60.0, size, Color { a: alpha, ..hex(0xff4f6d) });
+    }
+}
+
+fn mix_colors(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::new(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a)
+}
+
+fn draw_battle_panel(v: &View, b: &Battle) {
+    let (x, w) = (PANEL_X, MONSTER_PANEL_W);
+    let cx = x + w / 2.0;
+    let m = &b.monster;
+    let muted = hex(0x9aa3b8);
+
+    v.text(&format!("MONSTER {}", m.tier), x, BOARD_Y - 8.0, 22.0, muted);
+    v.rect(x, BOARD_Y, w, 300.0, hex(0x141824));
+    v.outline(x, BOARD_Y, w, 300.0, 2.0, hex(0x262c3d));
+    v.text_centered(m.name, cx, BOARD_Y + 40.0, 34.0, hex(m.color));
+    draw_monster(v, b, cx, BOARD_Y + 170.0);
+
+    // HP.
+    let hp_y = BOARD_Y + 320.0;
+    v.text("HP", x, hp_y + 18.0, 22.0, muted);
+    bar(v, x + 44.0, hp_y, w - 44.0, 24.0, b.hp as f32 / m.max_hp as f32, hex(0x5cdb5c));
+    v.text_centered(&format!("{} / {}", b.hp, m.max_hp), x + 44.0 + (w - 44.0) / 2.0, hp_y + 18.0, 20.0, WHITE);
+
+    // Time left.
+    let time_y = hp_y + 80.0;
+    let secs = b.time_left.ceil() as u32;
+    let urgent = b.time_left < 10.0 && b.phase == Phase::Fighting;
+    let pulse = if urgent { 0.6 + 0.4 * (get_time() as f32 * 10.0).sin().abs() } else { 1.0 };
+    let time_color = if urgent { with_alpha(hex(0xff4f6d), pulse) } else { WHITE };
+    v.text("TIME", x, time_y, 22.0, muted);
+    v.text(&format!("{}:{:02}", secs / 60, secs % 60), x + 70.0, time_y + 4.0, 44.0, time_color);
+
+    // Next garbage attack.
+    let atk_y = time_y + 40.0;
+    v.text("ATTACK", x, atk_y + 18.0, 22.0, muted);
+    let charge = 1.0 - b.attack_timer / m.attack_every;
+    let fighting = b.phase == Phase::Fighting;
+    bar(v, x + 90.0, atk_y, w - 90.0, 24.0, if fighting { charge } else { 0.0 }, hex(0xff9a3c));
+    v.text(
+        &format!("{} rows every {:.1}s", m.attack_lines, m.attack_every),
+        x,
+        atk_y + 50.0,
+        18.0,
+        hex(0x5d6680),
+    );
+
+    let stats_y = atk_y + 100.0;
+    v.text("DEFEATED", x, stats_y, 22.0, muted);
+    v.text(&b.defeated.to_string(), x, stats_y + 32.0, 34.0, WHITE);
+    v.text("DAMAGE", x + 160.0, stats_y, 22.0, muted);
+    v.text(&b.total_damage.to_string(), x + 160.0, stats_y + 32.0, 34.0, WHITE);
+}
+
+fn draw_battle_results(v: &View, b: &Battle) {
+    let cx = BOARD_X + BOARD_W / 2.0;
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.78));
+    let title = match b.phase {
+        Phase::Over(Defeat::Timeout) => "TIME UP",
+        _ => "TOPPED OUT",
+    };
+    v.text_centered(title, cx, BOARD_Y + 200.0, 52.0, hex(0xff4f6d));
+    let lines = [
+        ("monsters defeated", b.defeated.to_string()),
+        ("total damage", b.total_damage.to_string()),
+        ("fell to", format!("{} (lv {})", b.monster.name, b.monster.tier)),
+    ];
+    for (i, (label, value)) in lines.iter().enumerate() {
+        let y = BOARD_Y + 270.0 + i as f32 * 62.0;
+        v.text_centered(label, cx, y, 20.0, hex(0x9aa3b8));
+        v.text_centered(value, cx, y + 30.0, 30.0, WHITE);
+    }
+    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 500.0, 22.0, hex(0x9aa3b8));
 }
 
 pub struct MenuItem {
@@ -279,8 +429,8 @@ pub struct MenuItem {
 
 pub fn draw_menu(items: &[MenuItem], selected: usize, sound_on: bool, motion: Motion) {
     clear_background(hex(0x0b0d14));
-    let v = View::fit_window(Vec2::ZERO);
-    let cx = VIRTUAL_W / 2.0;
+    let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    let cx = CLASSIC_W / 2.0;
 
     // A few static blocks as backdrop, one of each piece colour.
     for (i, kind) in PieceKind::ALL.iter().enumerate() {

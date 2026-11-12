@@ -4,6 +4,7 @@
 use macroquad::prelude::*;
 
 use crate::audio::Audio;
+use crate::battle::Battle;
 use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::input::Input;
@@ -12,16 +13,21 @@ use crate::render::{self, MenuItem};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Classic,
+    Battler,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 1] = [Mode::Classic];
+    pub const ALL: [Mode; 2] = [Mode::Classic, Mode::Battler];
 
     fn menu_item(self) -> MenuItem {
         match self {
             Mode::Classic => MenuItem {
                 title: "CLASSIC",
                 blurb: "Endless stacking. Clear lines, level up, chase a high score.",
+            },
+            Mode::Battler => MenuItem {
+                title: "BATTLER",
+                blurb: "Beat a gauntlet of monsters before time runs out. They hit back with garbage.",
             },
         }
     }
@@ -38,21 +44,26 @@ struct Session {
     fx: Fx,
     input: Input,
     paused: bool,
+    battle: Option<Battle>,
 }
 
 impl Session {
     fn new(mode: Mode, motion: Motion) -> Self {
+        let mut game = Game::new(new_seed());
+        let battle = (mode == Mode::Battler).then(|| Battle::new(&mut game));
         Session {
             mode,
-            game: Game::new(new_seed()),
+            game,
             fx: Fx::new(motion),
             input: Input::default(),
             paused: false,
+            battle,
         }
     }
 
+    /// The run has ended: topped out, or (Battler) out of time.
     fn over(&self) -> bool {
-        self.game.game_over
+        self.game.game_over || self.battle.as_ref().is_some_and(Battle::over)
     }
 
     fn update(&mut self, dt: f32, audio: &Audio) {
@@ -63,14 +74,23 @@ impl Session {
         #[cfg(debug_assertions)]
         crate::debug::handle_keys(&mut self.game);
 
-        if !self.game.game_over {
+        if !self.over() {
             for action in self.input.poll(dt) {
                 self.game.apply(action);
             }
             self.game.tick(dt);
         }
         for event in self.game.take_events() {
+            if let Some(battle) = &mut self.battle {
+                battle.on_game_event(&event, &mut self.game);
+            }
             self.fx.handle(&event);
+        }
+        if let Some(battle) = &mut self.battle {
+            battle.update(dt, &mut self.game);
+            for event in battle.take_events() {
+                audio.handle_battle(&event);
+            }
         }
         self.fx.follow_active(self.game.active.y, self.game.grounded(), dt);
         self.fx.update(dt);
@@ -171,7 +191,7 @@ impl App {
                 let items: Vec<MenuItem> = Mode::ALL.iter().map(|m| m.menu_item()).collect();
                 render::draw_menu(&items, *selected, sound_on, self.motion);
             }
-            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, sound_on),
+            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, sound_on, s.battle.as_ref()),
         }
     }
 }
