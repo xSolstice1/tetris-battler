@@ -37,11 +37,50 @@ const BORDER_FLASH_TIME: f32 = 0.45;
 const DROP_BASE_TIME: f32 = 0.05;
 const DROP_TIME_PER_ROW: f32 = 0.0035;
 const DROP_MAX_TIME: f32 = 0.12;
+/// The flight never takes more than this share of the player's recent time between
+/// hard drops, so fast players get a near-instant snap (the board on screen is
+/// stale while a piece is in flight).
+const DROP_SHARE_OF_INTERVAL: f32 = 0.25;
+/// Flights shorter than about a frame aren't worth showing; land immediately.
+const DROP_MIN_TIME: f32 = 0.02;
+/// Weight of the newest interval in the running average (reacts within ~5 drops).
+const DROP_INTERVAL_SMOOTHING: f32 = 0.4;
+/// Pauses longer than this count as this, so one break doesn't hide the flight for long.
+const DROP_INTERVAL_CAP: f32 = 1.0;
 /// Motion-blur copies trail this far behind in drop progress.
 const DROP_BLUR_STEP: f32 = 0.12;
 /// How quickly the drawn active piece catches up with its logical row (1/s).
 /// ~30 ms time constant: glides between rows without feeling floaty.
 const ACTIVE_FOLLOW_RATE: f32 = 35.0;
+/// The drawn active piece never trails its logical row by more than this (rows).
+const ACTIVE_MAX_LAG: f32 = 0.4;
+
+/// How much the effects may move things away from the true board state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// Hard-drop flight, stack collapse and active-piece glide.
+    #[default]
+    Full,
+    /// Every frame shows the real board: no flight, collapse or glide.
+    /// Particles, shake and callouts stay, as they don't misrepresent the field.
+    Competitive,
+}
+
+impl Motion {
+    pub fn toggled(self) -> Self {
+        match self {
+            Motion::Full => Motion::Competitive,
+            Motion::Competitive => Motion::Full,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Motion::Full => "full",
+            Motion::Competitive => "competitive",
+        }
+    }
+}
 
 /// A hard-dropped piece still travelling down on screen. Events the game emitted
 /// after the drop (lock, clears, level up, ...) wait in `queued` until it lands,
@@ -136,7 +175,6 @@ struct LockFlash {
     t: f32,
 }
 
-#[derive(Default)]
 pub struct Fx {
     particles: Particles,
     shake: Shake,
@@ -151,6 +189,10 @@ pub struct Fx {
     active_y: Option<f32>,
     /// Set when a new piece appears, so it doesn't glide in from the old one.
     snap_active: bool,
+    /// Effects clock when the last hard drop happened, and the running average gap.
+    last_drop_at: Option<f32>,
+    drop_interval: f32,
+    motion: Motion,
     time: f32,
 }
 
@@ -207,7 +249,66 @@ fn burst_cell(particles: &mut Particles, x: i32, y: i32, color: Color, big: bool
     }
 }
 
+impl Default for Fx {
+    fn default() -> Self {
+        Fx::new(Motion::default())
+    }
+}
+
 impl Fx {
+    pub fn new(motion: Motion) -> Self {
+        Fx {
+            particles: Particles::default(),
+            shake: Shake::default(),
+            callouts: Callouts::default(),
+            clears: Vec::new(),
+            collapse: None,
+            trails: Vec::new(),
+            flashes: Vec::new(),
+            border: None,
+            drop: None,
+            active_y: None,
+            snap_active: false,
+            last_drop_at: None,
+            // Assume a relaxed pace until we've seen some drops.
+            drop_interval: DROP_INTERVAL_CAP,
+            motion,
+            time: 0.0,
+        }
+    }
+
+    pub fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// Switching to competitive immediately settles anything that's off the true board.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+        if motion == Motion::Competitive {
+            self.land();
+            self.collapse = None;
+            self.burst_due_cells(true);
+            self.snap_active = true;
+        }
+    }
+
+    /// Flight time for a drop of `distance` rows, given how fast the player is dropping.
+    fn drop_duration(&self, distance: i32) -> f32 {
+        if self.motion == Motion::Competitive {
+            return 0.0;
+        }
+        let by_distance = (DROP_BASE_TIME + distance as f32 * DROP_TIME_PER_ROW).min(DROP_MAX_TIME);
+        by_distance.min(DROP_SHARE_OF_INTERVAL * self.drop_interval)
+    }
+
+    fn record_drop_time(&mut self) {
+        if let Some(last) = self.last_drop_at {
+            let gap = (self.time - last).min(DROP_INTERVAL_CAP);
+            self.drop_interval += (gap - self.drop_interval) * DROP_INTERVAL_SMOOTHING;
+        }
+        self.last_drop_at = Some(self.time);
+    }
+
     pub fn handle(&mut self, event: &Event) {
         // The next piece is already live even while the last one is still falling
         // on screen, so snapping must not wait in the drop queue.
@@ -222,17 +323,21 @@ impl Fx {
         } = event
         {
             self.land(); // a new drop finishes any still in flight
+            self.record_drop_time();
             if *distance > 0 {
-                let d = *distance as f32;
                 self.drop = Some(Drop {
                     piece: *piece,
                     distance: *distance,
                     board: board.clone(),
                     color: render::piece_color(piece.kind),
                     t: 0.0,
-                    duration: (DROP_BASE_TIME + d * DROP_TIME_PER_ROW).min(DROP_MAX_TIME),
+                    duration: self.drop_duration(*distance),
                     queued: Vec::new(),
                 });
+                // Too quick to see: skip the flight but keep the impact (dust, shake, trail).
+                if self.drop.as_ref().is_some_and(|d| d.duration < DROP_MIN_TIME) {
+                    self.land();
+                }
             }
             return;
         }
@@ -256,10 +361,17 @@ impl Fx {
 
     fn apply(&mut self, event: &Event) {
         match event {
-            Event::Locked { piece } => self.flashes.push(LockFlash {
-                cells: piece.cells(),
-                t: 0.0,
-            }),
+            Event::Locked { piece } => {
+                // A new lock must never be drawn on rows that are still sliding:
+                // finish any collapse (and its pending cell bursts) right now.
+                if self.collapse.take().is_some() {
+                    self.burst_due_cells(true);
+                }
+                self.flashes.push(LockFlash {
+                    cells: piece.cells(),
+                    t: 0.0,
+                });
+            }
             Event::LinesCleared(clear) => self.line_clear(clear),
             Event::LevelUp { level } => {
                 let gold = render::hex(0xffd23f);
@@ -367,10 +479,34 @@ impl Fx {
                 big: lines >= 4 || c.t_spin,
                 t: 0.0,
             });
-            self.collapse = Some(Collapse {
-                shift: collapse_shifts(&c.rows),
-                t: 0.0,
-            });
+            match self.motion {
+                Motion::Full => {
+                    self.collapse = Some(Collapse {
+                        shift: collapse_shifts(&c.rows),
+                        t: 0.0,
+                    })
+                }
+                // Rows are already where they belong; don't draw old cells over them.
+                Motion::Competitive => self.burst_due_cells(true),
+            }
+        }
+    }
+
+    /// Bursts clearing cells whose sweep delay has passed, or all of them if `force`.
+    fn burst_due_cells(&mut self, force: bool) {
+        for anim in &mut self.clears {
+            for row in &mut anim.rows {
+                for x in 0..WIDTH {
+                    let delay = (x as f32 - (WIDTH as f32 - 1.0) / 2.0).abs().floor() * SWEEP_PER_COLUMN;
+                    if !row.burst[x] && (force || anim.t >= delay) {
+                        row.burst[x] = true;
+                        if let Some(kind) = row.cells[x] {
+                            let color = render::piece_color(kind);
+                            burst_cell(&mut self.particles, x as i32, row.y as i32, color, anim.big);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -386,19 +522,8 @@ impl Fx {
 
         for anim in &mut self.clears {
             anim.t += dt;
-            for row in &mut anim.rows {
-                for x in 0..WIDTH {
-                    let delay = (x as f32 - (WIDTH as f32 - 1.0) / 2.0).abs().floor() * SWEEP_PER_COLUMN;
-                    if !row.burst[x] && anim.t >= delay {
-                        row.burst[x] = true;
-                        if let Some(kind) = row.cells[x] {
-                            let color = render::piece_color(kind);
-                            burst_cell(&mut self.particles, x as i32, row.y as i32, color, anim.big);
-                        }
-                    }
-                }
-            }
         }
+        self.burst_due_cells(false);
         self.clears.retain(|a| a.t < CLEAR_ANIM_TIME);
 
         if let Some(c) = &mut self.collapse {
@@ -429,20 +554,21 @@ impl Fx {
     }
 
     /// Eases the drawn row of the active piece toward `logical_y`. Call once per frame
-    /// after handling that frame's events.
-    pub fn follow_active(&mut self, logical_y: i32, dt: f32) {
+    /// after handling that frame's events. Snaps exactly once the piece is `grounded`,
+    /// so tucks and spins always show the true position.
+    pub fn follow_active(&mut self, logical_y: i32, grounded: bool, dt: f32) {
         let target = logical_y as f32;
+        let snap = self.snap_active || grounded || self.motion == Motion::Competitive;
+        self.snap_active = false;
         match &mut self.active_y {
-            Some(y) if !self.snap_active => {
+            Some(y) if !snap => {
                 *y += (target - *y) * (1.0 - (-ACTIVE_FOLLOW_RATE * dt).exp());
+                *y = y.clamp(target - ACTIVE_MAX_LAG, target + ACTIVE_MAX_LAG);
                 if (target - *y).abs() < 0.01 {
                     *y = target;
                 }
             }
-            _ => {
-                self.active_y = Some(target);
-                self.snap_active = false;
-            }
+            _ => self.active_y = Some(target),
         }
     }
 
@@ -615,17 +741,129 @@ mod tests {
         assert!(fx.frozen_board().is_some(), "second drop now in flight");
     }
 
+    const FRAME: f32 = 1.0 / 60.0;
+
+    fn o_piece(y: i32) -> Active {
+        Active {
+            kind: crate::piece::PieceKind::O,
+            rot: 0,
+            x: 3,
+            y,
+        }
+    }
+
+    fn hard_drop(distance: i32) -> Event {
+        Event::HardDropped {
+            piece: o_piece(19),
+            distance,
+            board: Board::new(),
+        }
+    }
+
+    fn single_clear() -> Event {
+        Event::LinesCleared(LineClear {
+            rows: vec![TOTAL_ROWS - 1],
+            snapshot: vec![[Some(crate::piece::PieceKind::J); WIDTH]],
+            t_spin: false,
+            back_to_back: false,
+            combo: 0,
+            perfect_clear: false,
+        })
+    }
+
+    /// Hard drops `count` times, `gap` seconds apart.
+    fn drop_repeatedly(fx: &mut Fx, count: usize, gap: f32) {
+        for _ in 0..count {
+            fx.handle(&hard_drop(15));
+            fx.update(gap);
+        }
+    }
+
     #[test]
     fn active_piece_glides_but_snaps_on_spawn() {
         let mut fx = Fx::default();
-        fx.follow_active(20, 0.016);
-        fx.follow_active(21, 0.016);
+        fx.follow_active(20, false, FRAME);
+        fx.follow_active(21, false, FRAME);
         let offset = fx.active_offset(21);
         assert!(offset < 0.0 && offset > -CELL, "partway between rows: {offset}");
 
         fx.handle(&Event::Spawned);
-        fx.follow_active(19, 0.016);
+        fx.follow_active(19, false, FRAME);
         assert_eq!(fx.active_offset(19), 0.0);
+    }
+
+    #[test]
+    fn glide_lag_is_capped() {
+        let mut fx = Fx::default();
+        fx.follow_active(20, false, FRAME);
+        fx.follow_active(30, false, FRAME); // e.g. 20G gravity: many rows in one frame
+        assert!(fx.active_offset(30) >= -ACTIVE_MAX_LAG * CELL - 1e-3);
+    }
+
+    #[test]
+    fn glide_snaps_when_grounded() {
+        let mut fx = Fx::default();
+        fx.follow_active(20, false, FRAME);
+        fx.follow_active(21, true, FRAME);
+        assert_eq!(fx.active_offset(21), 0.0);
+    }
+
+    #[test]
+    fn relaxed_pace_keeps_the_full_flight() {
+        let mut fx = Fx::default();
+        drop_repeatedly(&mut fx, 10, 1.0);
+        let full = DROP_BASE_TIME + 15.0 * DROP_TIME_PER_ROW;
+        assert!((fx.drop_duration(15) - full).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fast_play_shrinks_the_flight() {
+        let mut fx = Fx::default();
+        drop_repeatedly(&mut fx, 15, 0.125); // 8 PPS
+        assert!((fx.drop_interval - 0.125).abs() < 0.01, "avg {}", fx.drop_interval);
+        assert!(fx.drop_duration(15) <= DROP_SHARE_OF_INTERVAL * 0.135);
+    }
+
+    #[test]
+    fn very_fast_play_skips_the_flight_but_keeps_the_impact() {
+        let mut fx = Fx::default();
+        drop_repeatedly(&mut fx, 20, 0.06);
+        fx.handle(&hard_drop(15));
+        assert_eq!(fx.frozen_board(), None, "landed immediately");
+        assert!(!fx.trails.is_empty(), "impact effects still fire");
+    }
+
+    #[test]
+    fn next_lock_cuts_the_collapse_short() {
+        let mut fx = Fx::default();
+        fx.handle(&single_clear());
+        assert!(fx.row_offset(10) < 0.0, "rows above the clear start raised");
+        fx.handle(&Event::Locked { piece: o_piece(37) });
+        assert_eq!(fx.row_offset(10), 0.0);
+        assert!(fx.clears.iter().flat_map(|a| &a.rows).all(|r| r.burst.iter().all(|&b| b)));
+    }
+
+    #[test]
+    fn competitive_motion_never_leaves_the_true_board() {
+        let mut fx = Fx::new(Motion::Competitive);
+        fx.handle(&hard_drop(18));
+        assert_eq!(fx.frozen_board(), None, "no flight");
+        fx.handle(&single_clear());
+        assert_eq!(fx.row_offset(10), 0.0, "no collapse");
+        fx.follow_active(20, false, FRAME);
+        fx.follow_active(21, false, FRAME);
+        assert_eq!(fx.active_offset(21), 0.0, "no glide");
+    }
+
+    #[test]
+    fn switching_to_competitive_settles_effects_in_progress() {
+        let mut fx = Fx::default();
+        fx.handle(&single_clear());
+        fx.handle(&hard_drop(18));
+        assert!(fx.frozen_board().is_some());
+        fx.set_motion(Motion::Competitive);
+        assert_eq!(fx.frozen_board(), None);
+        assert_eq!(fx.row_offset(10), 0.0);
     }
 
     #[test]

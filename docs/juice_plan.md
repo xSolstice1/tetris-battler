@@ -120,7 +120,7 @@ a rumble; KO explodes the loser's board.
 | 2 | Procedural audio, combo pitch ladder | Every action has a sound; combos audibly climb |
 | 3 | Perfect clear, level up, combo heat, danger, T-spin tell, hit-stop | Big plays clearly feel bigger than small ones |
 | 4 | Spawn/rotation/hold/queue tweens, game over sequence, background | Nothing on screen "teleports" |
-| 5 | Settings: shake/flash/particle toggles, volume | Effects can be dialled down |
+| 5 | Settings: shake/flash/particle toggles, volume, persisted to disk. **Done early:** `M` toggles motion full / competitive (no drop flight, collapse or glide) | Effects can be dialled down |
 
 ## Testing
 

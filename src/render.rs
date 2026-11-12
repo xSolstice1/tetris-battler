@@ -165,9 +165,12 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx) {
     if !game.game_over {
         let a = game.active;
         let color = piece_color(a.kind);
+        // The ghost is computed on the real board, so hide it while the last hard
+        // drop is still falling over the pre-lock board (it would float or overlap).
         let ghost_y = game.ghost_y();
+        let show_ghost = fx.frozen_board().is_none();
         for (cx, cy) in a.kind.cells(a.rot) {
-            if drawable_row(ghost_y + cy) {
+            if show_ghost && drawable_row(ghost_y + cy) {
                 let (px, py) = cell_pos(a.x + cx, ghost_y + cy);
                 v.rect(px + 2.0, py + 2.0, CELL - 4.0, CELL - 4.0, with_alpha(color, 0.12));
                 v.outline(px + 2.0, py + 2.0, CELL - 4.0, CELL - 4.0, 2.0, with_alpha(color, 0.5));
@@ -218,6 +221,9 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx) {
     for (i, line) in controls.iter().enumerate() {
         v.text(line, LEFT_X, BOARD_Y + 420.0 + i as f32 * 22.0, 18.0, hex(0x5d6680));
     }
+    let motion_y = BOARD_Y + 420.0 + controls.len() as f32 * 22.0 + 8.0;
+    v.text("M  motion:", LEFT_X, motion_y, 18.0, hex(0x5d6680));
+    v.text(fx.motion().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
 
     // Next queue on the right.
     let slot = 80.0;

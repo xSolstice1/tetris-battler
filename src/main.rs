@@ -43,11 +43,15 @@ async fn main() {
         // Clamp so a stalled frame (window drag, breakpoint) doesn't teleport pieces.
         let dt = get_frame_time().min(0.05);
 
+        if is_key_pressed(KeyCode::M) {
+            fx.set_motion(fx.motion().toggled());
+        }
+
         if game.game_over {
             if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
                 game = Game::new(new_seed());
                 input.reset();
-                fx = Fx::default();
+                fx = Fx::new(fx.motion());
             }
         } else if is_key_pressed(KeyCode::P) || is_key_pressed(KeyCode::Escape) {
             paused = !paused;
@@ -67,7 +71,7 @@ async fn main() {
             for event in game.take_events() {
                 fx.handle(&event);
             }
-            fx.follow_active(game.active.y, dt);
+            fx.follow_active(game.active.y, game.grounded(), dt);
             fx.update(dt);
         }
 

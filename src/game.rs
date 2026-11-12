@@ -226,7 +226,8 @@ impl Game {
         self.spawn(kind);
     }
 
-    fn grounded(&self) -> bool {
+    /// The active piece is resting on the stack or floor.
+    pub fn grounded(&self) -> bool {
         let a = self.active;
         !self.board.fits(a.kind, a.rot, a.x, a.y + 1)
     }
