@@ -74,7 +74,8 @@ impl Session {
         #[cfg(debug_assertions)]
         {
             crate::debug::handle_keys(&mut self.game);
-            if let (true, Some(battle)) = (is_key_pressed(KeyCode::F5), &mut self.battle) {
+            let skip = is_key_pressed(KeyCode::F5) || is_key_pressed(KeyCode::RightBracket);
+            if let (true, Some(battle)) = (skip, &mut self.battle) {
                 battle.skip_monster(&mut self.game);
             }
         }

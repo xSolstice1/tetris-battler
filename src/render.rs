@@ -4,7 +4,8 @@
 use macroquad::prelude::*;
 
 use crate::board::{Cell, HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
-use crate::battle::{self, Battle, Defeat, Phase};
+use crate::battle::{self, Ability, Battle, Defeat, Phase};
+use crate::monster_art::{self, Pixel};
 use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::piece::PieceKind;
@@ -90,6 +91,21 @@ impl View {
         let s = self.scale;
         let dims = measure_text(t, None, (size * s).max(1.0) as u16, 1.0);
         draw_text(t, self.ox + cx * s - dims.width / 2.0, self.oy + y * s, size * s, c);
+    }
+
+    fn ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32, c: Color) {
+        let s = self.scale;
+        draw_ellipse(self.ox + cx * s, self.oy + cy * s, rx * s, ry * s, 0.0, c);
+    }
+
+    fn circle(&self, cx: f32, cy: f32, r: f32, c: Color) {
+        let s = self.scale;
+        draw_circle(self.ox + cx * s, self.oy + cy * s, r * s, c);
+    }
+
+    fn circle_lines(&self, cx: f32, cy: f32, r: f32, thickness: f32, c: Color) {
+        let s = self.scale;
+        draw_circle_lines(self.ox + cx * s, self.oy + cy * s, r * s, thickness * s, c);
     }
 
     pub fn block(&self, x: f32, y: f32, size: f32, c: Color) {
@@ -280,7 +296,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
             v.rect(BOARD_X, BOARD_Y + 250.0, BOARD_W, 120.0, Color::new(0.0, 0.0, 0.0, 0.6));
             v.text_centered("DEFEATED!", BOARD_X + BOARD_W / 2.0, BOARD_Y + 305.0, 48.0, hex(0xffd23f));
             v.text_centered(
-                &format!("next: {}", next.name),
+                &format!("next: {}", next.title()),
                 BOARD_X + BOARD_W / 2.0,
                 BOARD_Y + 345.0,
                 22.0,
@@ -316,39 +332,138 @@ fn bar(v: &View, x: f32, y: f32, w: f32, h: f32, frac: f32, fill: Color) {
     v.outline(x, y, w, h, 2.0, hex(0x262c3d));
 }
 
-fn draw_monster(v: &View, b: &Battle, cx: f32, cy: f32) {
-    const PIXEL: f32 = 20.0;
-    let t = get_time() as f32;
-    let fading = match b.phase {
-        Phase::Intermission { left } => left / battle::INTERMISSION,
-        Phase::Over(_) => 1.0,
-        Phase::Fighting => 1.0,
-    };
-    // Idle bob, plus a recoil shudder and white flash right after a hit.
-    let recent_hit = b.hits.last().map_or(1.0, |&(_, age)| age);
-    let flash = (1.0 - recent_hit / 0.15).max(0.0);
-    let shudder = if recent_hit < 0.2 { (t * 90.0).sin() * 5.0 * (1.0 - recent_hit / 0.2) } else { 0.0 };
-    let bob = (t * 2.2).sin() * 6.0;
+/// Seconds before a monster attack during which it visibly winds up.
+const ATTACK_WARN: f32 = 1.0;
+const MONSTER_PIXEL: f32 = 12.0;
 
-    let w = battle::SPRITE_W as f32 * PIXEL;
-    let h = battle::SPRITE_H as f32 * PIXEL;
-    let (x0, y0) = (cx - w / 2.0 + shudder, cy - h / 2.0 + bob);
-    let body = hex(b.monster.color);
-    let color = Color {
-        a: fading,
-        ..mix_colors(body, WHITE, flash)
-    };
-    for (y, row) in b.monster.sprite.iter().enumerate() {
-        for (x, &filled) in row.iter().enumerate() {
-            if filled {
-                v.block(x0 + x as f32 * PIXEL, y0 + y as f32 * PIXEL, PIXEL, color);
+/// Deterministic 0..1 noise per sprite pixel (for the shatter on death).
+fn hash01(x: usize, y: usize, salt: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(374_761_393)
+        ^ (y as u32).wrapping_mul(668_265_263)
+        ^ salt.wrapping_mul(2_246_822_519);
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    (h ^ (h >> 16)) as f32 / u32::MAX as f32
+}
+
+fn pixel_color(p: Pixel, body: Color, accent: Color, blink: bool) -> Color {
+    let bg = hex(0x0b0d14);
+    let outline = mix_colors(body, bg, 0.78);
+    let shadow = mix_colors(body, bg, 0.38);
+    match p {
+        Pixel::Outline => outline,
+        Pixel::Body => body,
+        Pixel::Highlight => mix_colors(body, WHITE, 0.4),
+        Pixel::Shadow => shadow,
+        Pixel::Dark => mix_colors(body, bg, 0.7),
+        Pixel::Accent => accent,
+        // Closed eyes: the white becomes skin, the pupil an eyelid line.
+        Pixel::EyeWhite if blink => shadow,
+        Pixel::Pupil if blink => outline,
+        Pixel::EyeWhite => hex(0xf4f6ff),
+        Pixel::Pupil => hex(0x10131c),
+    }
+}
+
+/// Ability auras, drawn behind the monster.
+fn draw_aura(v: &View, b: &Battle, cx: f32, mid_y: f32, t: f32) {
+    if b.shield > 0 {
+        let r = 100.0 + (t * 2.0).sin() * 3.0;
+        v.circle(cx, mid_y, r, Color::new(0.31, 0.55, 1.0, 0.10));
+        v.circle_lines(cx, mid_y, r, 3.0, Color::new(0.45, 0.65, 1.0, 0.55));
+    }
+    if !b.ability_in_effect() && !b.regenerating() {
+        return;
+    }
+    match b.monster.ability {
+        Some(Ability::Haste) => {
+            // Speed lines streaking past.
+            for i in 0..7 {
+                let y = mid_y - 70.0 + i as f32 * 22.0;
+                let x = cx + 130.0 - (t * 650.0 + i as f32 * 97.0) % 280.0;
+                v.rect(x, y, 44.0, 2.0, Color::new(1.0, 1.0, 1.0, 0.45));
             }
         }
+        Some(Ability::Fog) => {
+            for i in 0..6 {
+                let a = t * 0.7 + i as f32 * 1.05;
+                let (x, y) = (cx + a.cos() * 95.0, mid_y + (a * 1.3).sin() * 55.0);
+                v.circle(x, y, 30.0 + (i % 3) as f32 * 8.0, Color::new(0.6, 0.64, 0.72, 0.18));
+            }
+        }
+        Some(Ability::Regen) => {
+            // Little green pluses drifting up.
+            for i in 0..5 {
+                let phase = (t * 0.8 + i as f32 * 0.2) % 1.0;
+                let (x, y) = (cx - 80.0 + i as f32 * 40.0, mid_y + 70.0 - phase * 150.0);
+                let c = Color::new(0.36, 0.86, 0.36, 1.0 - phase);
+                v.rect(x - 6.0, y - 2.0, 12.0, 4.0, c);
+                v.rect(x - 2.0, y - 6.0, 4.0, 12.0, c);
+            }
+        }
+        Some(Ability::Shield) | None => {}
     }
-    for (x, y) in battle::EYES {
-        let (ex, ey) = (x0 + x as f32 * PIXEL, y0 + y as f32 * PIXEL);
-        v.rect(ex + 3.0, ey + 3.0, PIXEL - 6.0, PIXEL - 6.0, Color { a: fading, ..WHITE });
-        v.rect(ex + 7.0, ey + 8.0, PIXEL - 13.0, PIXEL - 12.0, Color { a: fading, ..hex(0x10131c) });
+}
+
+/// Draws the monster standing with its feet at `feet_y`.
+fn draw_monster(v: &View, b: &Battle, cx: f32, feet_y: f32) {
+    use monster_art::{H, W};
+    let t = get_time() as f32;
+    let m = &b.monster;
+    let body = hex(m.color);
+    let accent = hex(m.art.accent);
+    let fighting = b.phase == Phase::Fighting;
+    let sprite_h = H as f32 * MONSTER_PIXEL;
+
+    // Death: 0 -> 1 over the break between monsters.
+    let dying = match b.phase {
+        Phase::Intermission { left } => Some(1.0 - left / battle::INTERMISSION),
+        _ => None,
+    };
+    let recent_hit = b.hits.last().map_or(f32::MAX, |&(_, age)| age);
+    let flash = (1.0 - recent_hit / 0.12).max(0.0);
+    let knock = (1.0 - recent_hit / 0.25).max(0.0);
+    // Winding up for a garbage attack: tint red and tremble.
+    let warn = if fighting && b.attack_timer < ATTACK_WARN { 1.0 - b.attack_timer / ATTACK_WARN } else { 0.0 };
+    let warn_pulse = 0.6 + 0.4 * (t * 18.0).sin();
+    // Just attacked (or just arrived): a quick lunge.
+    let since_attack = m.attack_every - b.attack_timer;
+    let lunge = if fighting { (1.0 - since_attack / 0.25).max(0.0) } else { 0.0 };
+
+    let breathe = (t * 3.0).sin();
+    let sx = 1.0 - 0.03 * breathe + 0.12 * lunge;
+    let sy = 1.0 + 0.035 * breathe + 0.08 * lunge;
+    let x0 = cx + warn * (t * 55.0).sin() * 3.0 + knock * knock * 12.0;
+    let blink = (t % 3.7) < 0.12 || recent_hit < 0.2;
+
+    if dying.is_none() {
+        draw_aura(v, b, cx, feet_y - sprite_h / 2.0, t);
+        v.ellipse(cx, feet_y + 4.0, 70.0 * sx, 9.0, Color::new(0.0, 0.0, 0.0, 0.35));
+    }
+
+    let (pw, ph) = (MONSTER_PIXEL * sx, MONSTER_PIXEL * sy);
+    for y in 0..H {
+        for x in 0..W {
+            let Some(p) = m.art.pixel(x, y) else {
+                continue;
+            };
+            let mut c = pixel_color(p, body, accent, blink);
+            c = mix_colors(c, hex(0xff3b4f), 0.45 * warn * warn_pulse);
+            c = mix_colors(c, WHITE, flash);
+            let mut px = x0 + (x as f32 - W as f32 / 2.0) * pw;
+            let mut py = feet_y - (H - y) as f32 * ph;
+            let mut alpha = 1.0;
+            if let Some(d) = dying {
+                // Shatter: every pixel flies off and falls, fading out.
+                c = mix_colors(c, WHITE, (1.0 - d / 0.08).max(0.0));
+                let secs = d * battle::INTERMISSION * 0.7;
+                let vx = (hash01(x, y, 1) - 0.5) * 260.0;
+                let vy = -(60.0 + hash01(x, y, 2) * 220.0);
+                px += vx * secs;
+                py += vy * secs + 500.0 * secs * secs;
+                alpha = (1.0 - d * 2.0).max(0.0);
+            }
+            v.rect(px, py, pw + 0.6, ph + 0.6, Color { a: alpha, ..c });
+        }
     }
 
     // Damage numbers float up from the monster.
@@ -356,7 +471,8 @@ fn draw_monster(v: &View, b: &Battle, cx: f32, cy: f32) {
         let k = age / battle::HIT_POPUP_TIME;
         let alpha = 1.0 - k * k;
         let size = 30.0 + damage.min(20) as f32;
-        v.text_centered(&format!("-{damage}"), cx + 70.0, cy - 40.0 - k * 60.0, size, Color { a: alpha, ..hex(0xff4f6d) });
+        let y = feet_y - sprite_h - 10.0 - k * 60.0;
+        v.text_centered(&format!("-{damage}"), cx + 80.0, y, size, Color { a: alpha, ..hex(0xff4f6d) });
     }
 }
 
@@ -372,10 +488,19 @@ fn draw_battle_panel(v: &View, b: &Battle) {
     let muted = hex(0x9aa3b8);
 
     v.text(&format!("MONSTER {}", m.tier), x, BOARD_Y - 8.0, 22.0, muted);
-    v.rect(x, BOARD_Y, w, 300.0, hex(0x141824));
+    // Backdrop tinted toward the monster's colour, deepest at the floor.
+    const BANDS: usize = 40;
+    let band_h = 300.0 / BANDS as f32;
+    for i in 0..BANDS {
+        let k = i as f32 / (BANDS - 1) as f32;
+        let c = mix_colors(hex(0x141824), hex(m.color), 0.02 + 0.10 * k * k);
+        v.rect(x, BOARD_Y + i as f32 * band_h, w, band_h + 0.5, c);
+    }
+    let feet_y = BOARD_Y + 238.0;
+    v.rect(x + 20.0, feet_y + 8.0, w - 40.0, 2.0, with_alpha(hex(m.color), 0.15));
     v.outline(x, BOARD_Y, w, 300.0, 2.0, hex(0x262c3d));
-    v.text_centered(m.name, cx, BOARD_Y + 40.0, 34.0, hex(m.color));
-    draw_monster(v, b, cx, BOARD_Y + 150.0);
+    v.text_centered(&m.title(), cx, BOARD_Y + 40.0, 34.0, hex(m.color));
+    draw_monster(v, b, cx, feet_y);
     if let Some(ability) = m.ability {
         let active = b.ability_in_effect();
         let pulse = 0.6 + 0.4 * (get_time() as f32 * 8.0).sin().abs();
@@ -442,7 +567,7 @@ fn draw_battle_results(v: &View, b: &Battle) {
     let lines = [
         ("monsters defeated", b.defeated.to_string()),
         ("total damage", b.total_damage.to_string()),
-        ("fell to", format!("{} (lv {})", b.monster.name, b.monster.tier)),
+        ("fell to", format!("{} (lv {})", b.monster.title(), b.monster.tier)),
     ];
     for (i, (label, value)) in lines.iter().enumerate() {
         let y = BOARD_Y + 270.0 + i as f32 * 62.0;

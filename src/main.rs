@@ -8,6 +8,7 @@ mod debug;
 mod fx;
 mod game;
 mod input;
+mod monster_art;
 mod piece;
 mod render;
 

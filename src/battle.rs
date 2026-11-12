@@ -5,7 +5,7 @@
 //!
 //! Pure logic: driven by game events and `update`, no rendering or input.
 
-use crate::bag::Rng;
+use crate::monster_art::{self, Art};
 use crate::game::{Event, Game, LineClear};
 
 /// Breather between monsters, seconds.
@@ -69,9 +69,6 @@ impl Ability {
     }
 }
 
-pub const SPRITE_W: usize = 10;
-pub const SPRITE_H: usize = 8;
-
 const NAMES: [&str; 10] = [
     "Slimeling",
     "Bramble Imp",
@@ -85,19 +82,31 @@ const NAMES: [&str; 10] = [
     "Void Lich",
 ];
 
-/// Body colours, cycled by tier.
-const PALETTE: [u32; 10] = [
-    0x7dff8a, 0x5cdb5c, 0xff9a3c, 0x7fd8ff, 0xb08cff, 0xa8b4c8, 0x4fbf8f, 0x4f8bff, 0xe8e0c8, 0xc061ff,
-];
+/// Each pass through the ten monsters after the first tints them this much
+/// further toward red ("elite" versions), up to `MAX_ELITE_TINT`.
+const ELITE_TINT_PER_CYCLE: f32 = 0.22;
+const MAX_ELITE_TINT: f32 = 0.6;
+const ELITE_RED: u32 = 0xff3b4f;
 
 pub fn damage_for(clear: &LineClear) -> u32 {
     clear.lines() * DAMAGE_PER_LINE + clear.attack * DAMAGE_PER_ATTACK
+}
+
+/// Blends two 0xRRGGBB colours.
+fn blend(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |c: u32, shift: u32| ((c >> shift) & 0xff) as f32;
+    let mix = |shift| (ch(a, shift) + (ch(b, shift) - ch(a, shift)) * t).round() as u32;
+    (mix(16) << 16) | (mix(8) << 8) | mix(0)
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Monster {
     pub tier: u32,
     pub name: &'static str,
+    /// 0 for the first ten tiers, then 1, 2, ... for each repeat of the roster.
+    pub elite: u32,
+    pub art: &'static Art,
+    /// Body colour after any elite tint (0xRRGGBB).
     pub color: u32,
     pub max_hp: u32,
     pub time_limit: f32,
@@ -107,45 +116,32 @@ pub struct Monster {
     /// Gravity level the player's field runs at during this fight.
     pub gravity_level: u32,
     pub ability: Option<Ability>,
-    pub sprite: [[bool; SPRITE_W]; SPRITE_H],
 }
 
-/// Symmetric random creature: generate the left half, mirror it, and make sure
-/// it has a solid core so it never comes out as scattered dots.
-fn sprite_for(tier: u32) -> [[bool; SPRITE_W]; SPRITE_H] {
-    let mut rng = Rng::new(0x5EED_0000 + tier as u64 * 7919);
-    let mut grid = [[false; SPRITE_W]; SPRITE_H];
-    let half = SPRITE_W / 2;
-    for (y, row) in grid.iter_mut().enumerate() {
-        for x in 0..half {
-            // Denser toward the centre column and the middle rows.
-            let centre = x as f32 / (half - 1) as f32;
-            let middle = 1.0 - ((y as f32 - 3.5).abs() / 4.0);
-            let chance = 0.25 + 0.45 * centre * middle + 0.2 * middle;
-            let filled = (rng.next_u64() % 1000) as f32 / 1000.0 < chance;
-            row[x] = filled;
-            row[SPRITE_W - 1 - x] = filled;
+impl Monster {
+    /// Name with an elite marker, e.g. "Slimeling +1".
+    pub fn title(&self) -> String {
+        if self.elite == 0 {
+            self.name.to_owned()
+        } else {
+            format!("{} +{}", self.name, self.elite)
         }
     }
-    for row in grid.iter_mut().take(6).skip(2) {
-        for cell in row.iter_mut().take(7).skip(3) {
-            *cell = true;
-        }
-    }
-    grid
 }
-
-/// Eye cells (always drawn on the solid core).
-pub const EYES: [(usize, usize); 2] = [(3, 3), (6, 3)];
 
 pub fn monster(tier: u32) -> Monster {
     let tier = tier.max(1);
     let t = (tier - 1) as f32;
     let i = (tier as usize - 1) % NAMES.len();
+    let elite = (tier - 1) / NAMES.len() as u32;
+    let art = monster_art::ALL[i];
+    let tint = (elite as f32 * ELITE_TINT_PER_CYCLE).min(MAX_ELITE_TINT);
     Monster {
         tier,
         name: NAMES[i],
-        color: PALETTE[i],
+        elite,
+        art,
+        color: blend(art.body, ELITE_RED, tint),
         max_hp: (20.0 * 1.28f32.powf(t)).round() as u32,
         time_limit: (90.0 - 4.0 * t).max(50.0),
         attack_every: (10.0 - 0.6 * t).max(3.5),
@@ -153,7 +149,6 @@ pub fn monster(tier: u32) -> Monster {
         gravity_level: tier.min(15),
         ability: (tier >= FIRST_ABILITY_TIER)
             .then(|| Ability::ALL[(tier - FIRST_ABILITY_TIER) as usize % Ability::ALL.len()]),
-        sprite: sprite_for(tier),
     }
 }
 
@@ -256,6 +251,14 @@ impl Battle {
     /// Fog is hiding the player's next queue right now.
     pub fn next_hidden(&self) -> bool {
         self.phase == Phase::Fighting && self.monster.ability == Some(Ability::Fog) && self.ability_active > 0.0
+    }
+
+    /// Regen is currently healing (for the UI).
+    pub fn regenerating(&self) -> bool {
+        self.phase == Phase::Fighting
+            && self.monster.ability == Some(Ability::Regen)
+            && self.since_hit >= REGEN_DELAY
+            && self.hp < self.monster.max_hp
     }
 
     /// A timed ability is currently in effect (for the UI).
@@ -425,19 +428,22 @@ mod tests {
     }
 
     #[test]
-    fn sprites_are_symmetric_with_a_solid_core() {
-        for tier in 1..20 {
-            let s = monster(tier).sprite;
-            for row in s {
-                for x in 0..SPRITE_W {
-                    assert_eq!(row[x], row[SPRITE_W - 1 - x]);
-                }
-            }
-            for (x, y) in EYES {
-                assert!(s[y][x], "eyes sit on the body");
-            }
-        }
-        assert_eq!(monster(4).sprite, monster(4).sprite, "deterministic");
+    fn roster_cycles_with_elite_versions() {
+        assert_eq!(monster(1).art, &monster_art::SLIMELING);
+        assert_eq!(monster(10).art, &monster_art::VOID_LICH);
+        let (first, elite) = (monster(1), monster(11));
+        assert_eq!(elite.art, first.art);
+        assert_eq!((first.elite, elite.elite), (0, 1));
+        assert_eq!(first.title(), "Slimeling");
+        assert_eq!(elite.title(), "Slimeling +1");
+        assert_eq!(first.color, first.art.body, "no tint before the first repeat");
+        assert_ne!(elite.color, first.color, "elites are tinted");
+    }
+
+    #[test]
+    fn blend_endpoints() {
+        assert_eq!(blend(0x102030, 0xffffff, 0.0), 0x102030);
+        assert_eq!(blend(0x102030, 0xffffff, 1.0), 0xffffff);
     }
 
     #[test]
