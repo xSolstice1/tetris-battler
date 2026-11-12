@@ -4,7 +4,7 @@
 use macroquad::prelude::*;
 
 use crate::board::{Cell, HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
-use crate::fx::Fx;
+use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::piece::PieceKind;
 
@@ -266,8 +266,52 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool) {
         v.text_centered(subtitle, BOARD_X + BOARD_W / 2.0, BOARD_Y + BOARD_H / 2.0 + 30.0, 22.0, hex(0x9aa3b8));
     };
     if game.game_over {
-        overlay("GAME OVER", "Enter / R to restart");
+        overlay("GAME OVER", "Enter retry   ·   Esc menu");
     } else if paused {
-        overlay("PAUSED", "P / Esc to resume");
+        overlay("PAUSED", "Esc resume   ·   Q menu");
     }
+}
+
+pub struct MenuItem {
+    pub title: &'static str,
+    pub blurb: &'static str,
+}
+
+pub fn draw_menu(items: &[MenuItem], selected: usize, sound_on: bool, motion: Motion) {
+    clear_background(hex(0x0b0d14));
+    let v = View::fit_window(Vec2::ZERO);
+    let cx = VIRTUAL_W / 2.0;
+
+    // A few static blocks as backdrop, one of each piece colour.
+    for (i, kind) in PieceKind::ALL.iter().enumerate() {
+        let x = 60.0 + i as f32 * 95.0;
+        let y = 640.0 + (i % 2) as f32 * 30.0;
+        draw_mini_piece(&v, *kind, x, y, with_alpha(piece_color(*kind), 0.25));
+    }
+
+    v.text_centered("BLOCK", cx - 95.0, 170.0, 76.0, hex(0xffd23f));
+    v.text_centered("BRAWL", cx + 105.0, 170.0, 76.0, hex(0xff4f6d));
+    v.text_centered("a falling-block battler", cx, 210.0, 22.0, hex(0x5d6680));
+
+    let (w, h, gap) = (420.0, 64.0, 18.0);
+    for (i, item) in items.iter().enumerate() {
+        let x = cx - w / 2.0;
+        let y = 270.0 + i as f32 * (h + gap);
+        let active = i == selected;
+        v.rect(x, y, w, h, if active { hex(0x1c2234) } else { hex(0x141824) });
+        v.outline(x, y, w, h, 2.0, if active { hex(0xffd23f) } else { hex(0x262c3d) });
+        let color = if active { WHITE } else { hex(0x9aa3b8) };
+        v.text_centered(item.title, cx, y + h / 2.0 + 12.0, 34.0, color);
+    }
+    if let Some(item) = items.get(selected) {
+        let y = 270.0 + items.len() as f32 * (h + gap) + 20.0;
+        v.text_centered(item.blurb, cx, y, 20.0, hex(0x9aa3b8));
+    }
+
+    let footer = format!(
+        "Up/Down choose  ·  Enter play  ·  M motion: {}  ·  N sound: {}",
+        motion.label(),
+        if sound_on { "on" } else { "off" }
+    );
+    v.text_centered(&footer, cx, 730.0, 18.0, hex(0x5d6680));
 }

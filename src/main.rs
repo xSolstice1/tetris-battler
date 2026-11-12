@@ -1,3 +1,4 @@
+mod app;
 mod audio;
 mod bag;
 mod board;
@@ -11,10 +12,7 @@ mod render;
 
 use macroquad::prelude::*;
 
-use audio::Audio;
-use fx::Fx;
-use game::Game;
-use input::Input;
+use app::App;
 
 fn window_conf() -> Conf {
     Conf {
@@ -27,64 +25,15 @@ fn window_conf() -> Conf {
     }
 }
 
-fn new_seed() -> u64 {
-    (macroquad::miniquad::date::now() * 1000.0) as u64
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
-    // Effects randomness only; the game has its own seeded RNG.
-    macroquad::rand::srand(new_seed());
+    // Effects randomness only; each game has its own seeded RNG.
+    macroquad::rand::srand((macroquad::miniquad::date::now() * 1000.0) as u64);
 
-    let mut game = Game::new(new_seed());
-    let mut input = Input::default();
-    let mut fx = Fx::default();
-    let mut audio = Audio::load().await;
-    let mut paused = false;
-
+    let mut app = App::new().await;
     loop {
         // Clamp so a stalled frame (window drag, breakpoint) doesn't teleport pieces.
-        let dt = get_frame_time().min(0.05);
-
-        if is_key_pressed(KeyCode::M) {
-            fx.set_motion(fx.motion().toggled());
-        }
-        if is_key_pressed(KeyCode::N) {
-            audio.toggle_mute();
-        }
-
-        if game.game_over {
-            if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
-                game = Game::new(new_seed());
-                input.reset();
-                fx = Fx::new(fx.motion());
-            }
-        } else if is_key_pressed(KeyCode::P) || is_key_pressed(KeyCode::Escape) {
-            paused = !paused;
-            input.reset();
-        }
-
-        if !paused {
-            #[cfg(debug_assertions)]
-            debug::handle_keys(&mut game);
-
-            if !game.game_over {
-                for action in input.poll(dt) {
-                    game.apply(action);
-                }
-                game.tick(dt);
-            }
-            for event in game.take_events() {
-                fx.handle(&event);
-            }
-            fx.follow_active(game.active.y, game.grounded(), dt);
-            fx.update(dt);
-            for event in fx.take_presented() {
-                audio.handle(&event);
-            }
-        }
-
-        render::draw(&game, paused, &fx, !audio.muted());
+        app.frame(get_frame_time().min(0.05));
         next_frame().await;
     }
 }
