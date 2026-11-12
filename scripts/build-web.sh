@@ -4,6 +4,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# Pick up a rustup-installed toolchain when the shell didn't (e.g. Vercel's build step).
+# shellcheck disable=SC1091
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+rustc --version
 target_dir="${CARGO_TARGET_DIR:-target}"
 out=dist/web
 
