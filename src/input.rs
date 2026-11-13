@@ -17,6 +17,8 @@ pub struct Input {
     das_timer: f32,
     arr_timer: f32,
     soft_timer: f32,
+    /// Real presses of game keys so far (auto-repeat excluded), for KPP.
+    presses: u32,
 }
 
 fn pressed(keys: &[KeyCode]) -> bool {
@@ -24,8 +26,16 @@ fn pressed(keys: &[KeyCode]) -> bool {
 }
 
 impl Input {
+    /// Clears held-key state (e.g. on pause) but keeps the press count.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            presses: self.presses,
+            ..Self::default()
+        };
+    }
+
+    pub fn presses(&self) -> u32 {
+        self.presses
     }
 
     fn start_shift(&mut self, dir: i32) {
@@ -36,6 +46,21 @@ impl Input {
 
     pub fn poll(&mut self, dt: f32) -> Vec<Action> {
         let mut out = Vec::new();
+        const GAME_KEYS: [KeyCode; 12] = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Space,
+            KeyCode::X,
+            KeyCode::Z,
+            KeyCode::C,
+            KeyCode::LeftShift,
+            KeyCode::RightShift,
+            KeyCode::LeftControl,
+            KeyCode::RightControl,
+        ];
+        self.presses += GAME_KEYS.iter().filter(|&&k| is_key_pressed(k)).count() as u32;
 
         if pressed(&[KeyCode::C, KeyCode::LeftShift, KeyCode::RightShift]) {
             out.push(Action::Hold);

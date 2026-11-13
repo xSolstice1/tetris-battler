@@ -86,6 +86,7 @@ impl Session {
             for action in self.input.poll(dt) {
                 self.game.apply(action);
             }
+            self.game.stats.key_presses = self.input.presses();
             self.game.tick(dt);
         }
         for event in self.game.take_events() {

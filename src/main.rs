@@ -11,6 +11,7 @@ mod input;
 mod monster_art;
 mod piece;
 mod render;
+mod stats;
 
 use macroquad::prelude::*;
 

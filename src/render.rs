@@ -9,6 +9,7 @@ use crate::monster_art::{self, Pixel};
 use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::piece::PieceKind;
+use crate::stats::{self, Stats};
 
 /// Virtual canvas width for Classic and the menu; Battler adds the monster panel.
 const CLASSIC_W: f32 = 760.0;
@@ -85,6 +86,12 @@ impl View {
     fn text(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
         draw_text(t, self.ox + x * s, self.oy + y * s, size * s, c);
+    }
+
+    fn text_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
+        let s = self.scale;
+        let dims = measure_text(t, None, (size * s).max(1.0) as u16, 1.0);
+        draw_text(t, self.ox + right * s - dims.width, self.oy + y * s, size * s, c);
     }
 
     pub fn text_centered(&self, t: &str, cx: f32, y: f32, size: f32, c: Color) {
@@ -246,19 +253,19 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         v.text(value, LEFT_X, y + 32.0, 34.0, WHITE);
     }
 
-    let controls = [
-        "Left/Right  move",
-        "Down  soft drop",
-        "Space  hard drop",
-        "Up / X  rotate cw",
-        "Z / Ctrl  rotate ccw",
-        "C / Shift  hold",
-        "P / Esc  pause",
+    // Live performance stats.
+    let s = &game.stats;
+    let live = [
+        ("TIME", stats::clock(s.time)),
+        ("PIECES", s.pieces.to_string()),
+        ("PPS", stats::fmt_rate(s.pps(), 2)),
+        ("APM", stats::fmt_rate(s.apm(), 1)),
+        ("VS", stats::fmt_rate(s.vs(), 1)),
+        ("KPP", stats::fmt_rate(s.kpp(), 2)),
     ];
-    for (i, line) in controls.iter().enumerate() {
-        v.text(line, LEFT_X, BOARD_Y + 420.0 + i as f32 * 22.0, 18.0, hex(0x5d6680));
-    }
-    let motion_y = BOARD_Y + 420.0 + controls.len() as f32 * 22.0 + 8.0;
+    stat_rows(&v, LEFT_X, LEFT_X + PANEL_W, BOARD_Y + 370.0, &live, 28.0, 20.0);
+
+    let motion_y = BOARD_Y + 570.0;
     v.text("M  motion:", LEFT_X, motion_y, 18.0, hex(0x5d6680));
     v.text(fx.motion().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
     v.text("N  sound:", LEFT_X, motion_y + 22.0, 18.0, hex(0x5d6680));
@@ -308,16 +315,10 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     fx.draw_top(&v);
 
     // Overlays.
-    let field_cx = BOARD_X + BOARD_W / 2.0;
-    let overlay = |title: &str, subtitle: &str| {
-        v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.7));
-        v.text_centered(title, field_cx, BOARD_Y + BOARD_H / 2.0 - 10.0, 52.0, WHITE);
-        v.text_centered(subtitle, field_cx, BOARD_Y + BOARD_H / 2.0 + 30.0, 22.0, hex(0x9aa3b8));
-    };
     match battle {
-        Some(b) if b.over() || game.game_over => draw_battle_results(&v, b),
-        _ if game.game_over => overlay("GAME OVER", "Enter retry   ·   Esc menu"),
-        _ if paused => overlay("PAUSED", "Esc resume   ·   Q menu"),
+        Some(b) if b.over() || game.game_over => draw_battle_results(&v, b, &game.stats),
+        _ if game.game_over => draw_classic_results(&v, game),
+        _ if paused => draw_pause(&v),
         _ => {}
     }
 }
@@ -556,7 +557,7 @@ fn draw_battle_panel(v: &View, b: &Battle) {
     v.text(&b.total_damage.to_string(), x + 160.0, stats_y + 32.0, 34.0, WHITE);
 }
 
-fn draw_battle_results(v: &View, b: &Battle) {
+fn draw_battle_results(v: &View, b: &Battle, stats: &Stats) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.78));
     let title = match b.phase {
@@ -570,11 +571,70 @@ fn draw_battle_results(v: &View, b: &Battle) {
         ("fell to", format!("{} (lv {})", b.monster.title(), b.monster.tier)),
     ];
     for (i, (label, value)) in lines.iter().enumerate() {
-        let y = BOARD_Y + 270.0 + i as f32 * 62.0;
+        let y = BOARD_Y + 260.0 + i as f32 * 58.0;
         v.text_centered(label, cx, y, 20.0, hex(0x9aa3b8));
-        v.text_centered(value, cx, y + 30.0, 30.0, WHITE);
+        v.text_centered(value, cx, y + 28.0, 28.0, WHITE);
     }
-    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 500.0, 22.0, hex(0x9aa3b8));
+    let rows = summary_rows(stats);
+    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 450.0, &rows[2..8], 24.0, 18.0);
+    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 615.0, 20.0, hex(0x9aa3b8));
+}
+
+/// Label on the left, value right-aligned: a compact table.
+fn stat_rows(v: &View, left: f32, right: f32, top: f32, rows: &[(&str, String)], row_h: f32, size: f32) {
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let y = top + i as f32 * row_h;
+        v.text(label, left, y, size, hex(0x9aa3b8));
+        v.text_right(value, right, y, size, WHITE);
+    }
+}
+
+/// End-of-run numbers, shared by both result screens.
+fn summary_rows(s: &Stats) -> Vec<(&'static str, String)> {
+    vec![
+        ("time", stats::clock(s.time)),
+        ("lines", s.lines.to_string()),
+        ("pieces", s.pieces.to_string()),
+        ("PPS", stats::fmt_rate(s.pps(), 2)),
+        ("APM", stats::fmt_rate(s.apm(), 1)),
+        ("VS", stats::fmt_rate(s.vs(), 1)),
+        ("KPP", stats::fmt_rate(s.kpp(), 2)),
+        ("max combo", s.max_combo.to_string()),
+        ("max back-to-back", s.max_back_to_back.to_string()),
+        ("quads", s.quads.to_string()),
+        ("T-spins", s.t_spins.to_string()),
+        ("perfect clears", s.perfect_clears.to_string()),
+    ]
+}
+
+fn draw_classic_results(v: &View, game: &Game) {
+    let cx = BOARD_X + BOARD_W / 2.0;
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
+    v.text_centered("GAME OVER", cx, BOARD_Y + 90.0, 52.0, WHITE);
+    v.text_centered("score", cx, BOARD_Y + 140.0, 20.0, hex(0x9aa3b8));
+    v.text_centered(&game.score.to_string(), cx, BOARD_Y + 178.0, 38.0, hex(0xffd23f));
+    let rows = summary_rows(&game.stats);
+    stat_rows(v, BOARD_X + 30.0, BOARD_X + BOARD_W - 30.0, BOARD_Y + 230.0, &rows, 30.0, 20.0);
+    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 615.0, 20.0, hex(0x9aa3b8));
+}
+
+fn draw_pause(v: &View) {
+    let cx = BOARD_X + BOARD_W / 2.0;
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
+    v.text_centered("PAUSED", cx, BOARD_Y + 150.0, 52.0, WHITE);
+    let controls = [
+        ("move", "Left / Right"),
+        ("soft drop", "Down"),
+        ("hard drop", "Space"),
+        ("rotate cw", "Up / X"),
+        ("rotate ccw", "Z / Ctrl"),
+        ("hold", "C / Shift"),
+        ("motion", "M"),
+        ("sound", "N"),
+    ];
+    let rows: Vec<(&str, String)> = controls.iter().map(|&(a, k)| (a, k.to_owned())).collect();
+    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 220.0, &rows, 30.0, 20.0);
+    v.text_centered("Esc resume   ·   Q menu", cx, BOARD_Y + 500.0, 22.0, hex(0x9aa3b8));
 }
 
 pub struct MenuItem {

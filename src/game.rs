@@ -8,8 +8,9 @@
 use std::collections::VecDeque;
 
 use crate::bag::{Bag, Rng};
-use crate::board::{Board, HIDDEN_ROWS, Row, WIDTH};
+use crate::board::{Board, Cell, HIDDEN_ROWS, Row, WIDTH};
 use crate::piece::PieceKind;
+use crate::stats::Stats;
 
 pub const NEXT_PREVIEW: usize = 5;
 const LOCK_DELAY: f32 = 0.5;
@@ -143,6 +144,7 @@ pub struct Game {
     pub game_over: bool,
     /// Multiplies gravity speed (battle abilities use this). 1.0 = normal.
     pub gravity_scale: f32,
+    pub stats: Stats,
     bag: Bag,
     pending_garbage: VecDeque<Garbage>,
     garbage_rng: Rng,
@@ -185,6 +187,7 @@ impl Game {
             level: 1,
             game_over: false,
             gravity_scale: 1.0,
+            stats: Stats::default(),
             bag,
             pending_garbage: VecDeque::new(),
             garbage_rng: Rng::new(seed.rotate_left(17) ^ 0x6A4B_A6E5),
@@ -231,6 +234,7 @@ impl Game {
         if self.game_over {
             return;
         }
+        self.stats.time += dt;
         if self.grounded() {
             self.gravity_acc = 0.0;
             self.lock_timer += dt;
@@ -447,9 +451,14 @@ impl Game {
             return;
         }
 
+        self.stats.pieces += 1;
         let rows = self.board.full_rows();
         let cleared = rows.len();
-        let snapshot = rows.iter().map(|&y| self.board.row(y)).collect();
+        let snapshot: Vec<Row> = rows.iter().map(|&y| self.board.row(y)).collect();
+        self.stats.garbage_cleared += snapshot
+            .iter()
+            .filter(|row| row.contains(&Some(Cell::Garbage)))
+            .count() as u32;
         self.board.remove_rows(&rows);
         self.score_clear(rows, snapshot, t_spin);
 
@@ -554,6 +563,8 @@ impl Game {
         let perfect_clear = self.board.is_empty();
         let attack = attack_for(cleared, t_spin, back_to_back, combo, perfect_clear);
         let cancelled = self.cancel_garbage(attack);
+        self.stats
+            .record_clear(cleared, t_spin, back_to_back, combo, perfect_clear, attack);
         self.events.push(Event::LinesCleared(LineClear {
             rows,
             snapshot,
@@ -807,6 +818,29 @@ mod tests {
         }
         drop_i_into_right_well(&mut g);
         assert_eq!(g.level, 7);
+    }
+
+    #[test]
+    fn stats_count_pieces_time_attack_and_garbage_dug() {
+        let mut g = game_with(PieceKind::I);
+        g.tick(0.5);
+        assert!((g.stats.time - 0.5).abs() < 1e-6);
+        // Bottom 4 rows are garbage with the hole in column 9.
+        assert!(g.board.push_garbage(4, WIDTH - 1));
+        drop_i_into_right_well(&mut g);
+        assert_eq!(g.stats.pieces, 1);
+        assert_eq!(g.stats.lines, 4);
+        assert_eq!(g.stats.garbage_cleared, 4);
+        assert_eq!(g.stats.quads, 1);
+        assert_eq!(g.stats.attack, 4 + 10, "quad + perfect clear");
+    }
+
+    #[test]
+    fn stats_clock_stops_at_game_over() {
+        let mut g = game_with(PieceKind::O);
+        g.game_over = true;
+        g.tick(1.0);
+        assert_eq!(g.stats.time, 0.0);
     }
 
     #[test]
