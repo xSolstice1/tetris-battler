@@ -2,8 +2,19 @@
 //! are no audio asset files. Sounds are driven by the events the effects layer
 //! has *presented*, so they line up with what's on screen (e.g. the hard-drop
 //! thud plays when the falling piece lands, not when the logic locked it).
+//!
+//! Music is synthesised too (`music`, `songs`): looping stems whose volumes
+//! follow the game's `Mood` each frame (`player`).
 
+mod mood;
+mod music;
+mod player;
+mod songs;
 mod synth;
+
+use std::cell::Cell;
+
+pub use mood::{Mood, Track};
 
 use macroquad::audio::{PlaySoundParams, Sound, load_sound_from_bytes, play_sound};
 
@@ -225,6 +236,11 @@ pub struct Audio {
     /// `None` if any sound failed to load; the game then runs silently.
     bank: Option<Bank<Sound>>,
     muted: bool,
+    music: player::Player,
+    music_on: bool,
+    /// Energy from presented events since the last music update (events are
+    /// handled through `&self`).
+    energy: Cell<f32>,
 }
 
 impl Audio {
@@ -245,7 +261,13 @@ impl Audio {
             }
         }
         let bank = wavs.and_then(|w| w.try_map(|i| sounds[i].take()));
-        Audio { bank, muted: false }
+        Audio {
+            bank,
+            muted: false,
+            music: player::Player::new().await,
+            music_on: true,
+            energy: Cell::new(0.0),
+        }
     }
 
     pub fn muted(&self) -> bool {
@@ -254,6 +276,26 @@ impl Audio {
 
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
+    }
+
+    pub fn toggle_music(&mut self) {
+        self.music_on = !self.music_on;
+    }
+
+    /// Call once a frame with what the music should be doing.
+    pub fn update_music(&mut self, dt: f32, mood: &Mood) {
+        self.music.bump(self.energy.take());
+        let volume = if self.muted || !self.music_on { 0.0 } else { player::MUSIC_VOLUME };
+        self.music.update(dt, mood, volume);
+    }
+
+    /// On a menu: start preparing the music of the option under the cursor.
+    pub fn prefetch_music(&mut self, track: Track) {
+        self.music.prefetch(track);
+    }
+
+    fn lift(&self, amount: f32) {
+        self.energy.set(self.energy.get() + amount);
     }
 
     fn play(&self, pick: impl Fn(&Bank<Sound>) -> &Sound, volume: f32) {
@@ -276,6 +318,7 @@ impl Audio {
     pub fn handle_battle(&self, event: &BattleEvent) {
         match event {
             BattleEvent::Hit { damage } => {
+                self.lift((*damage as f32 * 0.02).min(0.2));
                 self.play(|b| &b.monster_hit, (0.35 + *damage as f32 * 0.03).min(0.8))
             }
             BattleEvent::MonsterAttack { .. } | BattleEvent::NewMonster { .. } => {
@@ -302,6 +345,11 @@ impl Audio {
             Event::Locked { .. } => self.play(|b| &b.lock, 0.35),
             Event::LinesCleared(c) => {
                 let lines = c.lines() as usize;
+                // Big clears lift the music for a while.
+                let lift = [0.0, 0.03, 0.08, 0.15, 0.3][lines.min(4)]
+                    + if c.t_spin { 0.2 } else { 0.0 }
+                    + if c.perfect_clear { 0.4 } else { 0.0 };
+                self.lift(lift);
                 if lines > 0 {
                     self.play(|b| &b.clear[lines.min(4) - 1], 0.6);
                     let step = (c.combo as usize).min(COMBO_STEPS - 1);

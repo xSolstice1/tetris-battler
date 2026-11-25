@@ -5,7 +5,7 @@ use macroquad::miniquad::CursorIcon;
 use macroquad::miniquad::window::set_mouse_cursor;
 use macroquad::prelude::*;
 
-use crate::audio::Audio;
+use crate::audio::{Audio, Mood, Track};
 use crate::battle::{Battle, BattleEvent};
 use crate::bot::SHADOWS;
 use crate::versus::{Versus, VsEvent};
@@ -266,7 +266,35 @@ impl App {
         if let Some(next) = self.update(dt) {
             self.screen = next;
         }
+        let mood = self.mood();
+        self.audio.update_music(dt, &mood);
+        // On the menus, get the highlighted option's music ready before it's picked.
+        let next = match self.screen {
+            Screen::Menu { selected } => match Mode::ALL[selected] {
+                Mode::Classic => Some(Track::Classic),
+                Mode::Battler => Some(Track::Battler),
+                Mode::Shadow => None,
+            },
+            Screen::Select { selected } => Some(Track::shadow(selected, SHADOWS.len())),
+            Screen::Play(_) => None,
+        };
+        if let Some(track) = next {
+            self.audio.prefetch_music(track);
+        }
         self.draw();
+    }
+
+    /// What the music should be doing on this screen.
+    fn mood(&self) -> Mood {
+        let Screen::Play(s) = &self.screen else {
+            return Mood::menu();
+        };
+        let track = match s.mode {
+            Mode::Classic => Track::Classic,
+            Mode::Battler => Track::Battler,
+            Mode::Shadow => Track::shadow(s.shadow, SHADOWS.len()),
+        };
+        Mood::play(track, &s.game, s.battle.as_ref(), s.versus.as_ref(), s.paused)
     }
 
     fn global_keys(&mut self) {
@@ -278,6 +306,9 @@ impl App {
         }
         if is_key_pressed(KeyCode::N) {
             self.audio.toggle_mute();
+        }
+        if is_key_pressed(KeyCode::J) {
+            self.audio.toggle_music();
         }
     }
 
