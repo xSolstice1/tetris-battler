@@ -44,6 +44,12 @@ pub struct Versus {
     /// Garbage lines each side has sent so far.
     pub sent: u32,
     pub received: u32,
+    /// Seconds since the player's garbage last hit the shadow, and how much it was.
+    pub since_hit: f32,
+    pub last_hit: u32,
+    /// Seconds since the shadow last sent garbage, and how much.
+    pub since_sent: f32,
+    pub last_sent: u32,
     events: Vec<VsEvent>,
 }
 
@@ -75,6 +81,10 @@ impl Versus {
             time: 0.0,
             sent: 0,
             received: 0,
+            since_hit: f32::MAX,
+            last_hit: 0,
+            since_sent: f32::MAX,
+            last_sent: 0,
             events: Vec::new(),
         }
     }
@@ -105,6 +115,8 @@ impl Versus {
         if lines > 0 {
             self.sent += lines;
             self.shadow.receive_garbage(lines);
+            self.since_hit = 0.0;
+            self.last_hit = lines;
         }
     }
 
@@ -124,6 +136,8 @@ impl Versus {
             Phase::Fighting => {}
         }
         self.time += dt;
+        self.since_hit += dt;
+        self.since_sent += dt;
         let level = level_at(self.time);
         if level != self.shadow.level {
             self.shadow.set_level(level);
@@ -137,6 +151,8 @@ impl Versus {
             if lines > 0 {
                 self.received += lines;
                 player.receive_garbage(lines);
+                self.since_sent = 0.0;
+                self.last_sent = lines;
             }
         }
 

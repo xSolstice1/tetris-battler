@@ -318,6 +318,11 @@ impl Game {
         self.back_to_back
     }
 
+    /// Clears in a row so far (-1 when the last lock cleared nothing).
+    pub fn combo(&self) -> i32 {
+        self.combo
+    }
+
     /// The active piece is resting on the stack or floor.
     pub fn grounded(&self) -> bool {
         let a = self.active;

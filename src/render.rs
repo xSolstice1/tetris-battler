@@ -117,6 +117,11 @@ impl View {
         draw_circle_lines(self.ox + cx * s, self.oy + cy * s, r * s, thickness * s, c);
     }
 
+    fn texture(&self, t: &Texture2D, x: f32, y: f32, w: f32, h: f32, tint: Color) {
+        let s = self.scale;
+        draw_texture_ex(t, self.ox + x * s, self.oy + y * s, tint, DrawTextureParams { dest_size: Some(vec2(w * s, h * s)), ..Default::default() });
+    }
+
     pub fn block(&self, x: f32, y: f32, size: f32, c: Color) {
         self.rect(x, y, size, size, shade(c, 0.55));
         self.rect(x + 2.0, y + 2.0, size - 4.0, size - 4.0, c);
@@ -322,7 +327,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     }
 
     if let Some(vs) = versus {
-        draw_versus_panel(&v, vs);
+        draw_versus_panel(&v, vs, still);
     }
 
     fx.draw_top(&v);
@@ -667,13 +672,44 @@ fn draw_pause(v: &View) {
 
 // ───────────── Shadow 1v1 ─────────────
 
+/// A shadow's portrait, decoded once and kept for the session.
+fn portrait(key: &str) -> Option<Texture2D> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<(String, Texture2D)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let bytes: &[u8] = match key {
+        "luoyi" => include_bytes!("../assets/portraits/luoyi.png"),
+        "deon" => include_bytes!("../assets/portraits/deon.png"),
+        "deon_extreme" => include_bytes!("../assets/portraits/deon_extreme.png"),
+        _ => return None,
+    };
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some((_, t)) = c.iter().find(|(k, _)| k == key) {
+            return Some(t.clone());
+        }
+        let t = Texture2D::from_file_with_format(bytes, Some(ImageFormat::Png));
+        t.set_filter(FilterMode::Linear);
+        c.push((key.to_owned(), t.clone()));
+        Some(t)
+    })
+}
+
+/// A portrait in a frame of the shadow's colour (nothing if it has none).
+fn draw_portrait(v: &View, p: &Profile, x: f32, y: f32, size: f32, tint: Color) {
+    if let Some(t) = portrait(p.portrait) {
+        v.rect(x - 2.0, y - 2.0, size + 4.0, size + 4.0, with_alpha(hex(p.color), 0.8 * tint.a));
+        v.texture(&t, x, y, size, size, tint);
+    }
+}
+
 const OPP_CELL: f32 = 22.0;
 const OPP_X: f32 = PANEL_X + 14.0;
 const OPP_Y: f32 = BOARD_Y + 78.0;
 const OPP_NEXT_X: f32 = OPP_X + WIDTH as f32 * OPP_CELL + 14.0;
 
 /// The shadow's field, live: name, board, hold / next, its numbers.
-fn draw_versus_panel(v: &View, vs: &Versus) {
+fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     let g = &vs.shadow;
     let p = vs.profile;
     let accent = hex(p.color);
@@ -681,14 +717,11 @@ fn draw_versus_panel(v: &View, vs: &Versus) {
     let (bw, bh) = (WIDTH as f32 * OPP_CELL, VISIBLE_ROWS as f32 * OPP_CELL);
 
     v.text("SHADOW", PANEL_X, BOARD_Y - 8.0, 22.0, muted);
-    v.text(p.name, OPP_X, BOARD_Y + 34.0, 40.0, accent);
-    v.text(
-        &format!("{}  ·  {:.0}-{:.0} PPM", p.rank, p.ppm.0, p.ppm.1),
-        OPP_X,
-        BOARD_Y + 60.0,
-        18.0,
-        hex(0x5d6680),
-    );
+    let face = 62.0;
+    draw_reacting_portrait(v, vs, OPP_X, BOARD_Y + 4.0, face, still);
+    let tx = OPP_X + face + 14.0;
+    v.text(p.name, tx, BOARD_Y + 34.0, if p.name.len() > 8 { 30.0 } else { 40.0 }, accent);
+    v.text(&format!("{}  ·  {:.0}-{:.0} PPM", p.rank, p.ppm.0, p.ppm.1), tx, BOARD_Y + 60.0, 18.0, hex(0x5d6680));
 
     // Field.
     let lost = vs.player_won();
@@ -757,6 +790,80 @@ fn draw_versus_panel(v: &View, vs: &Versus) {
     }
 }
 
+/// Seconds a portrait reaction lasts.
+const OUCH_TIME: f32 = 0.7;
+const TAUNT_TIME: f32 = 0.6;
+
+/// What the shadow says when hit with `lines` of garbage, and when sending `lines`.
+fn ouch_text(lines: u32) -> &'static str {
+    match lines {
+        0..=1 => "OUCH!",
+        2..=3 => "OOF!!",
+        4..=5 => "NOOO!",
+        _ => "AAARGH!!",
+    }
+}
+
+fn taunt_text(lines: u32) -> &'static str {
+    match lines {
+        0..=1 => "here!",
+        2..=3 => "take that!",
+        _ => "EAT THIS!",
+    }
+}
+
+/// The shadow's face, reacting: it flinches (shake, squash, red flash) when your garbage
+/// hits it, lunges with a glow when it sends you garbage, and greys out when it loses.
+/// With motion off the words still show, but nothing moves.
+fn draw_reacting_portrait(v: &View, vs: &Versus, x: f32, y: f32, size: f32, still: bool) {
+    let p = &vs.profile;
+    let Some(tex) = portrait(p.portrait) else {
+        return;
+    };
+    let t = get_time() as f32;
+    let hurt = (1.0 - vs.since_hit / OUCH_TIME).max(0.0);
+    let taunt = (1.0 - vs.since_sent / TAUNT_TIME).max(0.0);
+    let lost = vs.player_won();
+    let motion = if still { 0.0 } else { 1.0 };
+
+    // Flinch: a quick shake that dies out, squashed down; lunge: a bounce up in size.
+    let shake = motion * hurt * hurt * (t * 70.0).sin() * 7.0;
+    let squash = 1.0 - motion * 0.1 * hurt;
+    let lunge = 1.0 + motion * 0.14 * taunt * taunt;
+    let (w, h) = (size * lunge / squash.sqrt(), size * lunge * squash);
+    let (cx, base) = (x + size / 2.0 + shake, y + size);
+    let (px, py) = (cx - w / 2.0, base - h);
+
+    // Frame: the shadow's colour, flaring white on a taunt, red on a hit.
+    let mut frame = with_alpha(hex(p.color), 0.85);
+    frame = mix_colors(frame, WHITE, 0.7 * taunt);
+    frame = mix_colors(frame, hex(0xff3b4f), hurt);
+    if taunt > 0.0 && !still {
+        v.rect(px - 6.0 * taunt, py - 6.0 * taunt, w + 12.0 * taunt, h + 12.0 * taunt, with_alpha(hex(p.color), 0.35 * taunt));
+    }
+    v.rect(px - 2.0, py - 2.0, w + 4.0, h + 4.0, if lost { hex(0x4a5064) } else { frame });
+    let tint = if lost { Color::new(0.4, 0.4, 0.45, 1.0) } else { mix_colors(WHITE, hex(0xff8080), 0.6 * hurt) };
+    v.texture(&tex, px, py, w, h, tint);
+    if hurt > 0.0 {
+        v.rect(px, py, w, h, Color::new(1.0, 0.15, 0.2, 0.35 * hurt));
+    }
+
+    // The words pop beside the face and drift up.
+    let say = |text: &str, k: f32, color: Color, size_px: f32| {
+        let rise = motion * (1.0 - k) * 18.0;
+        let pop = 1.0 + motion * 0.5 * (k - 0.75).max(0.0) * 4.0;
+        // Over the top of the shadow's field (clear of its name), where the stack rarely reaches.
+        let field_mid = OPP_X + WIDTH as f32 * OPP_CELL / 2.0;
+        v.text_centered(text, field_mid, OPP_Y + 52.0 - rise, size_px * pop, with_alpha(color, k.min(1.0) * 1.4));
+    };
+    if hurt > 0.0 {
+        let big = vs.last_hit >= 4;
+        say(ouch_text(vs.last_hit), hurt, hex(0xff4f6d), if big { 30.0 } else { 24.0 });
+    } else if taunt > 0.0 && !lost {
+        say(taunt_text(vs.last_sent), taunt, hex(p.color), 20.0);
+    }
+}
+
 /// "3, 2, 1" over both fields, each number popping in.
 fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     let cx = BOARD_X + BOARD_W / 2.0;
@@ -765,8 +872,10 @@ fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     // Motion off: the number just changes, without the pop.
     let k = if still { 0.6 } else { left.fract() };
     let size = 90.0 + 50.0 * k * k;
-    v.text_centered(&n.to_string(), cx, BOARD_Y + BOARD_H / 2.0 + size * 0.3, size, with_alpha(WHITE, 0.4 + 0.6 * k));
-    v.text_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 110.0, 28.0, hex(vs.profile.color));
+    let face = 150.0;
+    draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 70.0, face, WHITE);
+    v.text_centered(&n.to_string(), cx, BOARD_Y + BOARD_H / 2.0 + 40.0 + size * 0.3, size, with_alpha(WHITE, 0.4 + 0.6 * k));
+    v.text_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 150.0, 28.0, hex(vs.profile.color));
 }
 
 /// A quick "GO!" as the match starts.
@@ -783,9 +892,11 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
     let (title, color) = if won { ("VICTORY", hex(0xffd23f)) } else { ("DEFEAT", hex(0xff4f6d)) };
-    v.text_centered(title, cx, BOARD_Y + 110.0, 58.0, color);
-    v.text_centered(&format!("vs {} ({})", vs.profile.name, vs.profile.rank.to_lowercase()), cx, BOARD_Y + 146.0, 22.0, hex(vs.profile.color));
-    v.text_centered(&stats::clock(vs.time), cx, BOARD_Y + 180.0, 22.0, hex(0x9aa3b8));
+    let face = 64.0;
+    draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 14.0, face, if won { Color::new(0.5, 0.5, 0.55, 1.0) } else { WHITE });
+    v.text_centered(title, cx, BOARD_Y + 130.0, 58.0, color);
+    v.text_centered(&format!("vs {} ({})", vs.profile.name, vs.profile.rank.to_lowercase()), cx, BOARD_Y + 162.0, 22.0, hex(vs.profile.color));
+    v.text_centered(&stats::clock(vs.time), cx, BOARD_Y + 192.0, 22.0, hex(0x9aa3b8));
 
     // You vs them, side by side.
     let theirs = &vs.shadow.stats;
@@ -827,7 +938,9 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
         v.rect(r.x, r.y, r.w, r.h, if active { hex(0x1c2234) } else { hex(0x141824) });
         v.outline(r.x, r.y, r.w, r.h, 2.0, if active { accent } else if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
         v.rect(r.x, r.y, 6.0, r.h, accent);
-        v.text(p.name, r.x + 24.0, r.y + r.h / 2.0 + 12.0, 34.0, if active { WHITE } else { hex(0x9aa3b8) });
+        let face = r.h - 16.0;
+        draw_portrait(&v, p, r.x + 18.0, r.y + 8.0, face, if active { WHITE } else { Color::new(0.7, 0.7, 0.75, 1.0) });
+        v.text(p.name, r.x + 30.0 + face, r.y + r.h / 2.0 + 12.0, if p.name.len() > 8 { 28.0 } else { 34.0 }, if active { WHITE } else { hex(0x9aa3b8) });
         v.text_right(p.rank, r.right() - 20.0, r.y + 28.0, 20.0, accent);
         v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 50.0, 18.0, hex(0x9aa3b8));
     }
