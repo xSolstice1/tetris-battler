@@ -270,13 +270,13 @@ impl App {
         self.audio.update_music(dt, &mood);
         // On the menus, get the highlighted option's music ready before it's picked.
         let next = match self.screen {
-            Screen::Menu { selected } => match Mode::ALL[selected] {
-                Mode::Classic => Some(Track::Classic),
-                Mode::Battler => Some(Track::Battler),
-                Mode::Shadow => None,
+            Screen::Menu { selected } => match MENU[selected] {
+                Entry::Play(Mode::Classic) => Some(Track::Classic),
+                Entry::Play(Mode::Battler) => Some(Track::Battler),
+                _ => None,
             },
             Screen::Select { selected } => Some(Track::shadow(selected, SHADOWS.len())),
-            Screen::Play(_) => None,
+            Screen::Play(_) | Screen::Skins { .. } => None,
         };
         if let Some(track) = next {
             self.audio.prefetch_music(track);
@@ -522,7 +522,7 @@ impl App {
             }
             Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.scene_fx, &self.progress),
             Screen::Skins { col, row } => render::draw_skins(&self.progress, *col, *row, self.skins_hover),
-            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, s.battle.as_ref(), s.versus.as_ref(), s.reward.as_ref()),
+            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, self.audio.music_on(), s.battle.as_ref(), s.versus.as_ref(), s.reward.as_ref()),
         }
     }
 }

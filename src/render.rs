@@ -385,7 +385,7 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
 }
 
 /// A play session. `reward` is what the finished run earned (shown on the results).
-pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, battle: Option<&Battle>, versus: Option<&Versus>, reward: Option<&Reward>) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, music_on: bool, battle: Option<&Battle>, versus: Option<&Versus>, reward: Option<&Reward>) {
     let theme = theme();
     clear_background(hex(theme.backdrop));
     let width = if battle.is_some() || versus.is_some() { BATTLE_W } else { CLASSIC_W };
@@ -531,6 +531,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, b
     v.text(if scene.on() { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 22.0, 18.0, hex(0x9aa3b8));
     v.text("N  sound:", LEFT_X, motion_y + 44.0, 18.0, hex(0x5d6680));
     v.text(if sound_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 44.0, 18.0, hex(0x9aa3b8));
+    v.text("J  music:", LEFT_X, motion_y + 66.0, 18.0, hex(0x5d6680));
+    v.text(if music_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 66.0, 18.0, hex(0x9aa3b8));
 
     // Next queue on the right.
     let slot = 80.0;
@@ -943,7 +945,7 @@ fn draw_classic_results(v: &View, game: &Game, reward: Option<&Reward>) {
 fn draw_pause(v: &View) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
-    v.text_centered("PAUSED", cx, BOARD_Y + 150.0, 52.0, WHITE);
+    v.text_centered("PAUSED", cx, BOARD_Y + 120.0, 52.0, WHITE);
     let controls = [
         ("move", "Left / Right"),
         ("soft drop", "Down"),
@@ -954,10 +956,11 @@ fn draw_pause(v: &View) {
         ("motion (field)", "M"),
         ("scene effects", "E"),
         ("sound", "N"),
+        ("music", "J"),
     ];
     let rows: Vec<(&str, String)> = controls.iter().map(|&(a, k)| (a, k.to_owned())).collect();
-    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 220.0, &rows, 30.0, 20.0);
-    v.text_centered("Esc resume   ·   Q menu", cx, BOARD_Y + 500.0, 22.0, hex(0x9aa3b8));
+    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 180.0, &rows, 30.0, 20.0);
+    v.text_centered("Esc resume   ·   Q menu", cx, BOARD_Y + 180.0 + rows.len() as f32 * 30.0 + 30.0, 22.0, hex(0x9aa3b8));
 }
 
 // ───────────── Shadow 1v1 ─────────────
@@ -1428,7 +1431,7 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
     }
 
     v.text_centered(
-        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / E / N toggle",
+        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / E / N / J toggle",
         cx,
         712.0,
         18.0,

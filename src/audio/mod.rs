@@ -278,6 +278,10 @@ impl Audio {
         self.muted = !self.muted;
     }
 
+    pub fn music_on(&self) -> bool {
+        self.music_on
+    }
+
     pub fn toggle_music(&mut self) {
         self.music_on = !self.music_on;
     }
