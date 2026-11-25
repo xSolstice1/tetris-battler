@@ -1391,7 +1391,7 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
     // A few static blocks as backdrop, one of each piece colour.
     for (i, kind) in PieceKind::ALL.iter().enumerate() {
         // Down both sides, clear of the menu column.
-        let (x, y) = if i < 4 { (82.0, 300.0 + i as f32 * 105.0) } else { (678.0, 352.0 + (i - 4) as f32 * 105.0) };
+        let (x, y) = if i < 4 { (82.0, 290.0 + i as f32 * 88.0) } else { (678.0, 334.0 + (i - 4) as f32 * 88.0) };
         draw_mini_piece(&v, *kind, x, y, with_alpha(piece_color(*kind), 0.25));
     }
 
