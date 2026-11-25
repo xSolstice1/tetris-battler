@@ -45,7 +45,24 @@ pub struct Profile {
 }
 
 /// Easiest first.
-pub const SHADOWS: [Profile; 6] = [
+pub const SHADOWS: [Profile; 7] = [
+    Profile {
+        name: "JIANJIE THE SLOTH",
+        blurb: "In no hurry. None at all. For your very first match.",
+        rank: "SLOTH",
+        // About 10 PPM.
+        ppm: (9.0, 11.0),
+        key_gap: 0.25,
+        sloppy: 0.35,
+        misdrop: 0.05,
+        stacks_for_quads: false,
+        holds: false,
+        lookahead: false,
+        spins: false,
+        pc_search: false,
+        color: 0xb08d6a,
+        portrait: "jianjie",
+    },
     Profile {
         name: "LUOYI ANGEL",
         blurb: "Gentle and patient. The perfect first opponent.",
@@ -891,7 +908,7 @@ mod tests {
     #[test]
     fn deon_plays_at_1_6_to_1_7_pieces_per_second() {
         for seed in 1..=4 {
-            let g = solo(SHADOWS[3], 180.0, seed);
+            let g = solo(SHADOWS[4], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: Deon topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((96.0..=102.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM (1.6-1.7 PPS)");
@@ -913,7 +930,7 @@ mod tests {
     fn deon_clears_with_quads_not_random_lines() {
         let (mut lines, mut quad_lines) = (0, 0);
         for seed in [1, 2, 4, 6, 8, 10] {
-            let g = solo(SHADOWS[3], 180.0, seed);
+            let g = solo(SHADOWS[4], 180.0, seed);
             lines += g.stats.lines;
             quad_lines += 4 * g.stats.quads;
         }
@@ -926,7 +943,7 @@ mod tests {
     fn deon_extreme_is_fast_and_spins() {
         let mut spins = 0;
         for seed in [1, 2, 4, 6] {
-            let g = solo(SHADOWS[4], 180.0, seed);
+            let g = solo(SHADOWS[5], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((110.0..=120.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
@@ -940,7 +957,7 @@ mod tests {
     fn deon_nightmare_is_fast_and_perfect_clears() {
         let mut pcs = 0;
         for seed in [1, 2, 4, 6] {
-            let g = solo(SHADOWS[5], 120.0, seed);
+            let g = solo(SHADOWS[6], 120.0, seed);
             assert!(!g.game_over, "seed {seed}: topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((160.0..=182.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
@@ -949,10 +966,20 @@ mod tests {
         assert!(pcs >= 4, "only {pcs} perfect clears in 8 minutes");
     }
 
+    /// Jianjie plays about 10 pieces a minute.
+    #[test]
+    fn jianjie_is_a_sloth() {
+        for seed in 1..=3 {
+            let g = solo(SHADOWS[0], 300.0, seed);
+            let ppm = g.stats.pps().unwrap() * 60.0;
+            assert!((8.5..=11.5).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
+        }
+    }
+
     /// The beginner shadows survive on their own (beating them should take playing).
     #[test]
     fn beginner_shadows_survive_alone() {
-        for p in &SHADOWS[..3] {
+        for p in &SHADOWS[1..4] {
             for seed in 1..=8 {
                 let g = solo(*p, 180.0, seed);
                 assert!(!g.game_over, "{} seed {seed}: topped out alone", p.name);
@@ -963,14 +990,14 @@ mod tests {
     #[test]
     fn deon_outpaces_luoyi() {
         let lines = |p: Profile| solo(p, 120.0, 11).stats.lines;
-        let (luoyi, deon) = (lines(SHADOWS[1]), lines(SHADOWS[3]));
+        let (luoyi, deon) = (lines(SHADOWS[2]), lines(SHADOWS[4]));
         assert!(deon > luoyi, "Deon {deon} lines vs Luoyi {luoyi}");
     }
 
     #[test]
     fn candidates_include_hold_and_every_column() {
         let g = Game::new(3);
-        let c = candidates(&g, SHADOWS[3]);
+        let c = candidates(&g, SHADOWS[4]);
         assert!(c.iter().any(|c| c.actions.first() == Some(&Action::Hold)));
         assert!(c.iter().all(|c| c.actions.last() == Some(&Action::HardDrop)));
         assert!(c.len() >= 20, "{} placements", c.len());
@@ -991,7 +1018,7 @@ mod probe {
                 let mut bot = Bot::new(*p, seed);
                 let dt = 1.0 / 60.0;
                 let mut t = 0.0;
-                while t < 180.0 && !g.game_over {
+                while t < 300.0 && !g.game_over {
                     bot.update(dt, &mut g);
                     g.tick(dt);
                     g.take_events();

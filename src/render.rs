@@ -678,6 +678,7 @@ fn portrait(key: &str) -> Option<Texture2D> {
         static CACHE: std::cell::RefCell<Vec<(String, Texture2D)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let bytes: &[u8] = match key {
+        "jianjie" => include_bytes!("../assets/portraits/jianjie.png"),
         "luoyi_angel" => include_bytes!("../assets/portraits/luoyi_angel.png"),
         "luoyi" => include_bytes!("../assets/portraits/luoyi.png"),
         "deon" => include_bytes!("../assets/portraits/deon.png"),
@@ -931,8 +932,8 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     let cx = CLASSIC_W / 2.0;
-    v.text_centered("CHOOSE YOUR SHADOW", cx, 140.0, 52.0, WHITE);
-    v.text_centered("a true 1v1 against a bot at its own pace", cx, 180.0, 22.0, hex(0x5d6680));
+    v.text_centered("CHOOSE YOUR SHADOW", cx, 128.0, 52.0, WHITE);
+    v.text_centered("a true 1v1 against a bot at its own pace", cx, 166.0, 22.0, hex(0x5d6680));
     for (i, p) in shadows.iter().enumerate() {
         let r = select_item_rect(i);
         let active = i == selected;
@@ -944,8 +945,8 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
         let face = r.h - 16.0;
         draw_portrait(&v, p, r.x + 18.0, r.y + 8.0, face, if active { WHITE } else { Color::new(0.7, 0.7, 0.75, 1.0) });
         v.text(p.name, r.x + 30.0 + face, r.y + r.h / 2.0 + 12.0, if p.name.len() > 8 { 28.0 } else { 34.0 }, if active { WHITE } else { hex(0x9aa3b8) });
-        v.text_right(p.rank, r.right() - 20.0, r.y + 25.0, 20.0, accent);
-        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 46.0, 18.0, hex(0x9aa3b8));
+        v.text_right(p.rank, r.right() - 20.0, r.y + 23.0, 20.0, accent);
+        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 43.0, 18.0, hex(0x9aa3b8));
     }
     if let Some(p) = shadows.get(selected) {
         let y = select_item_rect(shadows.len()).y + 16.0;
@@ -955,7 +956,7 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
 }
 
 fn select_item_rect(i: usize) -> Rect {
-    Rect::new(CLASSIC_W / 2.0 - 230.0, 222.0 + i as f32 * 70.0, 460.0, 60.0)
+    Rect::new(CLASSIC_W / 2.0 - 230.0, 206.0 + i as f32 * 64.0, 460.0, 56.0)
 }
 
 /// Which shadow (if any) is under `screen_pos` on the select screen.
