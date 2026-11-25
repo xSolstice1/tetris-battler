@@ -58,6 +58,8 @@ struct Session {
     versus: Option<Versus>,
     /// The shadow faced (Shadow mode), for a rematch.
     shadow: usize,
+    /// Seconds until the next danger heartbeat.
+    beat: f32,
 }
 
 impl Session {
@@ -75,6 +77,7 @@ impl Session {
             battle,
             versus,
             shadow,
+            beat: 0.0,
         }
     }
 
@@ -133,6 +136,17 @@ impl Session {
             for event in battle.take_events() {
                 audio.handle_battle(&event);
             }
+        }
+        // Near the top: a heartbeat, quickening as the danger grows.
+        let danger = if self.live() { crate::danger::level(&self.game) } else { 0.0 };
+        if danger > 0.0 {
+            self.beat -= dt;
+            if self.beat <= 0.0 {
+                audio.heartbeat(danger);
+                self.beat = crate::danger::beat_interval(danger);
+            }
+        } else {
+            self.beat = 0.0;
         }
         self.fx.follow_active(self.game.active.y, self.game.grounded(), dt);
         self.fx.update(dt);

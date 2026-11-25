@@ -42,6 +42,8 @@ pub struct Bank<T> {
     monster_hit: T,
     monster_roar: T,
     victory: T,
+    /// "Lub-dub" when the stack is in danger.
+    heartbeat: T,
 }
 
 impl<T> Bank<T> {
@@ -67,6 +69,7 @@ impl<T> Bank<T> {
             monster_hit: f(self.monster_hit)?,
             monster_roar: f(self.monster_roar)?,
             victory: f(self.victory)?,
+            heartbeat: f(self.heartbeat)?,
         })
     }
 }
@@ -187,6 +190,11 @@ pub fn synthesize() -> Bank<Vec<f32>> {
     lowpass(&mut monster_roar, 900.0);
     mix(&mut monster_roar, &noise(&mut rng, 0.4, 700.0, 250.0, 5.0, 1.0), 0.0, 0.4);
 
+    // Two low thumps, the second softer: a heartbeat.
+    let mut heartbeat = Voice::new(Wave::Sine, 62.0, 0.14).sweep_to(42.0).decay(22.0).render();
+    mix(&mut heartbeat, &Voice::new(Wave::Sine, 55.0, 0.12).sweep_to(38.0).decay(26.0).render(), 0.17, 0.6);
+    lowpass(&mut heartbeat, 300.0);
+
     let mut victory = arpeggio(Wave::Square, C5, &[0, 7, 12, 16, 19, 24], 0.06, 0.2, 9.0);
     lowpass(&mut victory, 4500.0);
     mix(&mut victory, &bell(note(C6, 7), 0.8, 0.6), 0.36, 1.0);
@@ -209,6 +217,7 @@ pub fn synthesize() -> Bank<Vec<f32>> {
         monster_hit: finish(monster_hit),
         monster_roar: finish(monster_roar),
         victory: finish(victory),
+        heartbeat: finish(heartbeat),
     }
 }
 
@@ -257,6 +266,11 @@ impl Audio {
                 },
             );
         }
+    }
+
+    /// One heartbeat, louder the closer the stack is to the top.
+    pub fn heartbeat(&self, danger: f32) {
+        self.play(|b| &b.heartbeat, 0.35 + 0.45 * danger.clamp(0.0, 1.0));
     }
 
     pub fn handle_battle(&self, event: &BattleEvent) {
@@ -332,6 +346,7 @@ mod tests {
             &bank.monster_hit,
             &bank.monster_roar,
             &bank.victory,
+            &bank.heartbeat,
         ];
         v.extend(bank.clear.iter());
         v.extend(bank.combo.iter());

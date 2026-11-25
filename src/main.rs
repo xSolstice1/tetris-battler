@@ -3,6 +3,7 @@ mod audio;
 mod bag;
 mod battle;
 mod board;
+mod danger;
 mod bot;
 #[cfg(debug_assertions)]
 mod debug;

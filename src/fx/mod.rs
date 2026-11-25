@@ -211,7 +211,12 @@ pub struct Fx {
     motion: Motion,
     presented: Vec<Event>,
     time: f32,
+    /// Seconds since the player topped out (the stack crumbles), if they have.
+    death: Option<f32>,
 }
+
+/// How long the top-out crumble plays before the results appear.
+pub const DEATH_TIME: f32 = 1.4;
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
@@ -292,6 +297,7 @@ impl Fx {
             motion,
             presented: Vec::new(),
             time: 0.0,
+            death: None,
         }
     }
 
@@ -415,7 +421,10 @@ impl Fx {
                 self.callouts.push(format!("LEVEL {level}"), gold, 30.0);
                 self.border = Some((gold, BORDER_FLASH_TIME));
             }
-            Event::GameOver => self.shake.add(0.6),
+            Event::GameOver => {
+                self.shake.add(0.8);
+                self.death = Some(0.0);
+            }
             // The stack shoves up: a short upward jolt.
             Event::GarbageRose { lines } => {
                 self.shake.add((0.06 + *lines as f32 * 0.03).min(0.3));
@@ -555,6 +564,9 @@ impl Fx {
 
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
+        if let Some(d) = &mut self.death {
+            *d += dt;
+        }
 
         if let Some(drop) = &mut self.drop {
             drop.t += dt;
@@ -624,6 +636,19 @@ impl Fx {
     /// lock; the renderer should draw this instead of the live board.
     pub fn frozen_board(&self) -> Option<&Board> {
         self.drop.as_ref().map(|d| &d.board)
+    }
+
+    /// Progress of the top-out crumble (0 -> 1), while it plays.
+    pub fn death_progress(&self) -> Option<f32> {
+        if !self.motion.animated() {
+            return None;
+        }
+        self.death.map(|t| (t / DEATH_TIME).min(1.0)).filter(|&k| k < 1.0)
+    }
+
+    /// The crumble is over (or there is none to wait for): results can show.
+    pub fn death_done(&self) -> bool {
+        self.death_progress().is_none()
     }
 
     pub fn shake_offset(&self) -> Vec2 {

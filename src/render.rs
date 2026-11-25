@@ -177,15 +177,22 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     // Motion off: nothing on screen moves on its own.
     let still = !fx.motion().animated();
 
-    // Field frame (flashes with the last clear's colour) and background.
-    v.rect(
-        BOARD_X - 4.0,
-        BOARD_Y - 4.0,
-        BOARD_W + 8.0,
-        BOARD_H + 8.0,
-        fx.border_color(hex(0x262c3d)),
-    );
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, field_bg);
+    // Danger: the closer the stack is to the top, the stronger and faster the field pulses
+    // red (motion off: a steady tint).
+    let danger = crate::danger::level(game);
+    let pulse = if still { 0.6 } else { 0.5 + 0.5 * (get_time() as f32 * (4.0 + 7.0 * danger)).sin() };
+    let red = hex(0xff3b4f);
+
+    // Field frame (flashes with the last clear's colour, red in danger) and background.
+    let frame = mix_colors(fx.border_color(hex(0x262c3d)), red, danger * (0.45 + 0.55 * pulse));
+    if danger > 0.0 {
+        // A soft red glow around the field.
+        for (i, a) in [(14.0, 0.06), (9.0, 0.1), (5.0, 0.16)] {
+            v.rect(BOARD_X - i, BOARD_Y - i, BOARD_W + 2.0 * i, BOARD_H + 2.0 * i, with_alpha(red, a * danger * (0.4 + 0.6 * pulse)));
+        }
+    }
+    v.rect(BOARD_X - 4.0, BOARD_Y - 4.0, BOARD_W + 8.0, BOARD_H + 8.0, frame);
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, mix_colors(field_bg, red, 0.12 * danger * (0.5 + 0.5 * pulse)));
     let grid = hex(0x181c28);
     for x in 1..WIDTH {
         v.rect(BOARD_X + x as f32 * CELL, BOARD_Y, 1.0, BOARD_H, grid);
@@ -197,11 +204,16 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     // Settled stack, offset while it collapses after a clear. During a hard drop's
     // flight, show the field as it was before the lock.
     let board = fx.frozen_board().unwrap_or(&game.board);
+    let death = fx.death_progress();
     for y in HIDDEN_ROWS - 1..TOTAL_ROWS {
         let offset = fx.row_offset(y);
         for x in 0..WIDTH {
             if let Some(cell) = board.get(x, y) {
                 let (px, py) = cell_pos(x as i32, y as i32);
+                if let Some(k) = death {
+                    draw_crumbling_cell(&v, px, py, x, y, cell, k);
+                    continue;
+                }
                 let c = if game.game_over { hex(0x4a5064) } else { cell_color(cell) };
                 v.block(px, py + offset, CELL, c);
             }
@@ -243,6 +255,18 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
                 let (px, py) = cell_pos(x, y);
                 v.block(px, py + glide, CELL, active_color);
             }
+        }
+    }
+
+    // In danger, an outline shows where the next piece will appear (red if it can't).
+    if danger >= 0.5 && !game.game_over {
+        let kind = game.next[0];
+        let blocked = crate::danger::next_spawn_blocked(game);
+        let c = if blocked { red } else { mix_colors(piece_color(kind), red, 0.5) };
+        let a = if blocked { 0.5 + 0.5 * pulse } else { 0.35 + 0.35 * pulse };
+        for (cx, cy) in kind.cells(0) {
+            let (px, py) = cell_pos(3 + cx, HIDDEN_ROWS as i32 - 1 + cy);
+            v.outline(px + 3.0, py + 3.0, CELL - 6.0, CELL - 6.0, 3.0, with_alpha(c, a));
         }
     }
 
@@ -335,7 +359,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     // Overlays.
     if let Some(vs) = versus {
         match vs.phase {
-            VsPhase::Over { player_won } => draw_versus_results(&v, vs, player_won, &game.stats),
+            VsPhase::Over { player_won } if fx.death_done() => draw_versus_results(&v, vs, player_won, &game.stats),
+            VsPhase::Over { .. } => {}
             VsPhase::Countdown { left } => draw_countdown(&v, vs, left, still),
             VsPhase::Fighting if paused => draw_pause(&v),
             VsPhase::Fighting if still => {}
@@ -344,6 +369,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         return;
     }
     match battle {
+        _ if !fx.death_done() => {}
         Some(b) if b.over() || game.game_over => draw_battle_results(&v, b, &game.stats),
         _ if game.game_over => draw_classic_results(&v, game),
         _ if paused => draw_pause(&v),
@@ -729,7 +755,10 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
 
     // Field.
     let lost = vs.player_won();
-    let frame = if lost { hex(0x4a5064) } else { with_alpha(accent, 0.55) };
+    // The shadow's own danger shows too: its frame pulses red near the top.
+    let their_danger = crate::danger::level(g);
+    let beat = if still { 0.6 } else { 0.5 + 0.5 * (get_time() as f32 * (4.0 + 7.0 * their_danger)).sin() };
+    let frame = if lost { hex(0x4a5064) } else { mix_colors(with_alpha(accent, 0.55), hex(0xff3b4f), their_danger * (0.45 + 0.55 * beat)) };
     v.rect(OPP_X - 3.0, OPP_Y - 3.0, bw + 6.0, bh + 6.0, frame);
     v.rect(OPP_X, OPP_Y, bw, bh, hex(0x10131c));
     let cell = |x: i32, y: i32| (OPP_X + x as f32 * OPP_CELL, OPP_Y + (y - HIDDEN_ROWS as i32) as f32 * OPP_CELL);
@@ -791,6 +820,24 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     if lost {
         v.rect(OPP_X, OPP_Y + bh / 2.0 - 40.0, bw, 70.0, Color::new(0.0, 0.0, 0.0, 0.7));
         v.text_centered("TOPPED OUT", OPP_X + bw / 2.0, OPP_Y + bh / 2.0 + 6.0, 30.0, hex(0x9aa3b8));
+    }
+}
+
+/// A block of the topped-out stack: it flashes, greys, then breaks loose and falls away
+/// (each block on its own delay and drift), like the field giving out under you.
+fn draw_crumbling_cell(v: &View, px: f32, py: f32, x: usize, y: usize, cell: Cell, k: f32) {
+    let t = k * crate::fx::DEATH_TIME;
+    let grey = hex(0x4a5064);
+    let base = cell_color(cell);
+    // First a white flash, then the colour drains to grey.
+    let c = if t < 0.12 { mix_colors(base, WHITE, 1.0 - t / 0.12) } else { mix_colors(base, grey, ((t - 0.12) / 0.3).min(1.0)) };
+    let delay = 0.35 + hash01(x, y, 7) * 0.45 + (TOTAL_ROWS - y) as f32 * 0.008;
+    let fall = (t - delay).max(0.0);
+    let dy = 1500.0 * fall * fall;
+    let dx = (hash01(x, y, 8) - 0.5) * 140.0 * fall;
+    let alpha = (1.0 - fall * 1.6).clamp(0.0, 1.0);
+    if alpha > 0.0 {
+        v.block(px + dx, py + dy, CELL, Color { a: alpha, ..c });
     }
 }
 
