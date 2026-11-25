@@ -59,13 +59,13 @@ const ACTIVE_MAX_LAG: f32 = 0.4;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Motion {
     /// Hard-drop flight, stack collapse and active-piece glide.
-    #[default]
     Full,
     /// Every frame shows the real board: no flight, collapse or glide.
     /// Particles, shake and callouts stay, as they don't misrepresent the field.
     Competitive,
     /// No animation at all: the real board, and no particles, shake, flashes,
-    /// callouts or moving decorations anywhere. Sound is unaffected.
+    /// callouts or moving decorations anywhere. Sound is unaffected. The default.
+    #[default]
     Off,
 }
 
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn hard_drop_holds_follow_up_events_until_it_lands() {
         use crate::piece::PieceKind;
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         let piece = Active {
             kind: PieceKind::O,
             rot: 0,
@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn second_hard_drop_lands_the_first_immediately() {
         use crate::piece::PieceKind;
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         let piece = Active {
             kind: PieceKind::T,
             rot: 0,
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn active_piece_glides_but_snaps_on_spawn() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.follow_active(20, false, FRAME);
         fx.follow_active(21, false, FRAME);
         let offset = fx.active_offset(21);
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn glide_lag_is_capped() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.follow_active(20, false, FRAME);
         fx.follow_active(30, false, FRAME); // e.g. 20G gravity: many rows in one frame
         assert!(fx.active_offset(30) >= -ACTIVE_MAX_LAG * CELL - 1e-3);
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn glide_snaps_when_grounded() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.follow_active(20, false, FRAME);
         fx.follow_active(21, true, FRAME);
         assert_eq!(fx.active_offset(21), 0.0);
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn relaxed_pace_keeps_the_full_flight() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         drop_repeatedly(&mut fx, 10, 1.0);
         let full = DROP_BASE_TIME + 15.0 * DROP_TIME_PER_ROW;
         assert!((fx.drop_duration(15) - full).abs() < 1e-4);
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn fast_play_shrinks_the_flight() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         drop_repeatedly(&mut fx, 15, 0.125); // 8 PPS
         assert!((fx.drop_interval - 0.125).abs() < 0.01, "avg {}", fx.drop_interval);
         assert!(fx.drop_duration(15) <= DROP_SHARE_OF_INTERVAL * 0.135);
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn very_fast_play_skips_the_flight_but_keeps_the_impact() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         drop_repeatedly(&mut fx, 20, 0.06);
         fx.handle(&hard_drop(15));
         assert_eq!(fx.frozen_board(), None, "landed immediately");
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn next_lock_cuts_the_collapse_short() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.handle(&single_clear());
         assert!(fx.row_offset(10) < 0.0, "rows above the clear start raised");
         fx.handle(&Event::Locked { piece: o_piece(37) });
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn hard_drop_is_presented_at_landing_with_its_follow_ups() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.handle(&hard_drop(18));
         fx.handle(&Event::Locked { piece: o_piece(37) });
         fx.handle(&single_clear());
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn zero_distance_hard_drop_is_presented_immediately() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.handle(&hard_drop(0));
         assert_eq!(kinds(&fx.take_presented()), ["drop"]);
     }
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn switching_to_competitive_settles_effects_in_progress() {
-        let mut fx = Fx::default();
+        let mut fx = Fx::new(Motion::Full);
         fx.handle(&single_clear());
         fx.handle(&hard_drop(18));
         assert!(fx.frozen_board().is_some());
