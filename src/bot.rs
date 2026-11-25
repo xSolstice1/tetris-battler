@@ -7,7 +7,7 @@
 //! sometimes settle for a worse spot or misdrop. Pure logic, no rendering.
 
 use crate::bag::Rng;
-use crate::board::{Board, HIDDEN_ROWS, TOTAL_ROWS, WIDTH};
+use crate::board::{Board, Cell, HIDDEN_ROWS, TOTAL_ROWS, WIDTH};
 use crate::game::{Action, Active, Game, attack_for};
 use crate::piece::PieceKind;
 
@@ -41,13 +41,13 @@ pub struct Profile {
 pub const SHADOWS: [Profile; 2] = [
     Profile {
         name: "LUOYI",
-        blurb: "Still learning. Takes her time and leaves a few holes.",
+        blurb: "Learning to stack for quads. Slow, and a little untidy.",
         rank: "BEGINNER",
         ppm: (60.0, 70.0),
         key_gap: 0.08,
         sloppy: 0.2,
-        misdrop: 0.015,
-        stacks_for_quads: false,
+        misdrop: 0.008,
+        stacks_for_quads: true,
         holds: true,
         lookahead: false,
         color: 0x7fd8ff,
@@ -56,10 +56,11 @@ pub const SHADOWS: [Profile; 2] = [
         name: "DEON",
         blurb: "S-tier. Clean stack, quads back to back, punishes every mistake.",
         rank: "S TIER",
-        ppm: (88.0, 96.0),
+        // 1.6-1.7 PPS.
+        ppm: (97.0, 104.0),
         key_gap: 0.05,
-        sloppy: 0.06,
-        misdrop: 0.005,
+        sloppy: 0.0,
+        misdrop: 0.0,
         stacks_for_quads: true,
         holds: true,
         lookahead: true,
@@ -248,19 +249,20 @@ fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (start, prefix, after) in starts {
         for (landed, actions) in placements(&game.board, start, &prefix) {
-            let Some((field, lines)) = settle(&game.board, landed) else {
+            let Some(first) = settle(&game.board, landed) else {
                 out.push(Candidate { score: -1e6, actions });
                 continue;
             };
-            let (clear, b2b1) = clear_score(lines, field.is_empty(), b2b, &field, pending, profile);
+            let (clear, b2b1) = clear_score(&first, b2b, pending, profile);
+            let field = first.field;
             let score = if profile.lookahead && field.fits(after, 0, SPAWN_X, SPAWN_Y) {
                 // The best this field allows next, from which only its clears and final field count.
                 let best_next = placements(&field, spawn(after), &[])
                     .into_iter()
                     .filter_map(|(p2, _)| {
-                        let (f2, l2) = settle(&field, p2)?;
-                        let (c2, _) = clear_score(l2, f2.is_empty(), b2b1, &f2, pending, profile);
-                        Some(c2 + field_score(&f2, p2, pending, profile))
+                        let second = settle(&field, p2)?;
+                        let (c2, _) = clear_score(&second, b2b1, pending, profile);
+                        Some(c2 + field_score(&second.field, p2, pending, profile))
                     })
                     .fold(f32::MIN, f32::max);
                 clear + best_next.max(-1e5)
@@ -282,17 +284,25 @@ fn heights(board: &Board) -> [i32; WIDTH] {
     h
 }
 
-/// The field after `piece` locks and its full rows clear, and how many cleared.
-/// None if it would lock out (entirely above the visible field).
-fn settle(board: &Board, piece: Active) -> Option<(Board, u32)> {
+/// What a lock does: the field after its full rows clear, how many cleared and how many
+/// of those were garbage.
+struct Settled {
+    field: Board,
+    lines: u32,
+    garbage: u32,
+}
+
+/// None if `piece` would lock out (entirely above the visible field).
+fn settle(board: &Board, piece: Active) -> Option<Settled> {
     if piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32) {
         return None;
     }
     let mut b = board.clone();
     b.place(piece.kind, piece.rot, piece.x, piece.y);
     let rows = b.full_rows();
+    let garbage = rows.iter().filter(|&&y| b.row(y).contains(&Some(Cell::Garbage))).count() as u32;
     b.remove_rows(&rows);
-    Some((b, rows.len() as u32))
+    Some(Settled { field: b, lines: rows.len() as u32, garbage })
 }
 
 /// How high the stack (plus garbage on its way) stands above where it gets risky.
@@ -302,18 +312,29 @@ fn danger(field: &Board, pending: u32, profile: Profile) -> f32 {
     ((max_h + pending as i32) as f32 - safe).max(0.0)
 }
 
-/// What a clear of `lines` is worth to this shadow, and whether back-to-back holds after it.
-fn clear_score(lines: u32, perfect: bool, b2b: bool, field: &Board, pending: u32, profile: Profile) -> (f32, bool) {
+/// What a lock's clear is worth to this shadow, and whether back-to-back holds after it.
+///
+/// A quad builder plays like a pro: quads (back to back) are the point, and a small clear is
+/// a waste of the stack and breaks the chain, so it is only worth it to dig out garbage, to
+/// clear the board, or when the stack is in danger.
+fn clear_score(s: &Settled, b2b: bool, pending: u32, profile: Profile) -> (f32, bool) {
+    let lines = s.lines;
     if lines == 0 {
         return (0.0, b2b);
     }
     let quad = lines >= 4;
+    let perfect = s.field.is_empty();
     let attack = attack_for(lines, false, quad && b2b, 0, perfect) as f32;
-    if profile.stacks_for_quads && danger(field, pending, profile) < 1.0 {
-        // Building: quads (back to back if possible) are the point; small clears waste the stack
-        // and break the chain.
-        let s = if quad { 22.0 + if b2b { 8.0 } else { 0.0 } } else { -7.0 + lines as f32 - if b2b { 4.0 } else { 0.0 } };
-        (s + 1.5 * attack, quad)
+    if profile.stacks_for_quads && danger(&s.field, pending, profile) < 1.0 {
+        let score = if quad || perfect {
+            22.0 + if b2b { 8.0 } else { 0.0 }
+        } else {
+            // Digging garbage is fine; burning your own stack is not.
+            let own = (lines - s.garbage.min(lines)) as f32;
+            // Cheaper than a hole, though: a hole costs a future quad.
+            1.0 * s.garbage as f32 - 4.0 * own - if b2b { 3.0 } else { 0.0 }
+        };
+        (score + 1.5 * attack, quad)
     } else {
         // Surviving (or not a planner): any clear helps, bigger ones more.
         (3.4 * lines as f32 + 1.5 * attack, quad)
@@ -358,7 +379,8 @@ fn field_score(b: &Board, piece: Active, pending: u32, profile: Profile) -> f32 
     // A quad builder doesn't mind height while it's safe: it's the quad in waiting.
     let building = quads && danger < 1.0;
     let (w_agg, w_land) = if building { (0.12, 0.2) } else { (0.5, 0.6) };
-    let mut score = -w_agg * agg as f32 - 7.5 * holes as f32 - 1.2 * covered as f32 - 0.5 * bump as f32
+    let w_hole = if quads { 11.0 } else { 7.5 };
+    let mut score = -w_agg * agg as f32 - w_hole * holes as f32 - 1.6 * covered as f32 - 0.5 * bump as f32
         - w_land * landing as f32
         - 2.0 * shafts
         - 2.5 * danger * danger;
@@ -391,12 +413,12 @@ mod tests {
     }
 
     #[test]
-    fn deon_plays_at_about_90_pieces_per_minute() {
+    fn deon_plays_at_1_6_to_1_7_pieces_per_second() {
         for seed in 1..=4 {
             let g = solo(SHADOWS[1], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: Deon topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
-            assert!((87.0..=93.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
+            assert!((96.0..=102.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM (1.6-1.7 PPS)");
         }
     }
 
@@ -408,6 +430,19 @@ mod tests {
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!(ppm >= p.ppm.0 - 3.0 && ppm <= p.ppm.1 + 1.0, "{}: {ppm:.1} PPM, wants {:?}", p.name, p.ppm);
         }
+    }
+
+    /// Deon plays like a pro: nearly every line he clears is part of a quad.
+    #[test]
+    fn deon_clears_with_quads_not_random_lines() {
+        let (mut lines, mut quad_lines) = (0, 0);
+        for seed in [1, 2, 4, 6, 8, 10] {
+            let g = solo(SHADOWS[1], 180.0, seed);
+            lines += g.stats.lines;
+            quad_lines += 4 * g.stats.quads;
+        }
+        let share = quad_lines as f32 / lines as f32;
+        assert!(share >= 0.9, "only {:.0}% of Deon's lines came from quads", share * 100.0);
     }
 
     #[test]
@@ -448,7 +483,7 @@ mod probe {
                     g.take_events();
                     t += dt;
                 }
-                println!("{i} {} seed {seed}: t {t:.0} over {} pieces {} lines {} quads {} apm {:.1} ppm {:.1}", p.name, g.game_over, g.stats.pieces, g.stats.lines, g.stats.quads, g.stats.apm().unwrap_or(0.0), g.stats.pps().unwrap_or(0.0)*60.0);
+                println!("{i} {} seed {seed}: t {t:.0} over {} pieces {} lines {} quads {} small-lines {} apm {:.1} ppm {:.1}", p.name, g.game_over, g.stats.pieces, g.stats.lines, g.stats.quads, g.stats.lines - 4 * g.stats.quads, g.stats.apm().unwrap_or(0.0), g.stats.pps().unwrap_or(0.0)*60.0);
             }
         }
     }
