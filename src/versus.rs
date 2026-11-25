@@ -31,6 +31,10 @@ pub enum VsEvent {
     Go,
     Won,
     Lost,
+    /// The player's clear sent garbage to the shadow.
+    Sent { lines: u32 },
+    /// The shadow's clear sent garbage to the player.
+    Received { lines: u32 },
 }
 
 pub struct Versus {
@@ -117,6 +121,7 @@ impl Versus {
             self.shadow.receive_garbage(lines);
             self.since_hit = 0.0;
             self.last_hit = lines;
+            self.events.push(VsEvent::Sent { lines });
         }
     }
 
@@ -153,6 +158,7 @@ impl Versus {
                 player.receive_garbage(lines);
                 self.since_sent = 0.0;
                 self.last_sent = lines;
+                self.events.push(VsEvent::Received { lines });
             }
         }
 
@@ -217,7 +223,9 @@ mod tests {
         let (mut player, mut vs) = start(SHADOWS[5]);
         run(&mut vs, &mut player, 600.0);
         assert_eq!(vs.phase, Phase::Over { player_won: false });
-        assert!(vs.take_events().contains(&VsEvent::Lost));
+        let events = vs.take_events();
+        assert!(events.contains(&VsEvent::Lost));
+        assert!(events.iter().any(|e| matches!(e, VsEvent::Received { .. })), "the shadow's garbage is reported");
     }
 
     #[test]
@@ -247,9 +255,11 @@ mod tests {
             attack: 4,
             cancelled: 1,
         };
+        vs.take_events();
         vs.on_player_event(&Event::LinesCleared(clear));
         assert_eq!(vs.sent, 3);
         assert_eq!(vs.shadow.pending_garbage(), 3);
+        assert_eq!(vs.take_events(), vec![VsEvent::Sent { lines: 3 }]);
     }
 
     #[test]
