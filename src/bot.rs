@@ -767,14 +767,18 @@ struct Chain {
     combo: i32,
 }
 
-/// Always Some: a piece may rest in the buffer above the field (its height still counts
-/// as danger). Option kept so callers can skip impossible spots in future rules.
+/// None if `piece` would lock out: resting entirely above the visible field without
+/// clearing a line (a clutch clear there is fine).
 fn settle(board: &Board, piece: Active, t_spin: bool) -> Option<Settled> {
+    let above = piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32);
     let mut b = board.clone();
     b.place(piece.kind, piece.rot, piece.x, piece.y);
     let rows = b.full_rows();
     let garbage = rows.iter().filter(|&&y| b.row(y).contains(&Some(Cell::Garbage))).count() as u32;
     b.remove_rows(&rows);
+    if above && rows.is_empty() {
+        return None;
+    }
     Some(Settled { field: b, lines: rows.len() as u32, garbage, t_spin })
 }
 

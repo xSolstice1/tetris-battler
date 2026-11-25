@@ -154,6 +154,18 @@ impl Session {
         }
 
         if self.live() {
+            // IRS / IHS: keys already held (not just pressed) apply as the next piece spawns.
+            let held = |keys: &[KeyCode]| keys.iter().any(|&k| is_key_down(k) && !is_key_pressed(k));
+            self.game.initial = crate::game::Initial {
+                rotate: if held(&[KeyCode::Up, KeyCode::X]) {
+                    Some(true)
+                } else if held(&[KeyCode::Z, KeyCode::LeftControl, KeyCode::RightControl]) {
+                    Some(false)
+                } else {
+                    None
+                },
+                hold: held(&[KeyCode::C, KeyCode::LeftShift, KeyCode::RightShift]),
+            };
             for action in self.input.poll(dt) {
                 self.game.apply(action);
             }

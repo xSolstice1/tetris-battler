@@ -18,9 +18,15 @@ const MAX_LOCK_RESETS: u32 = 15;
 const SPAWN_X: i32 = 3;
 /// Box top sits one row above the visible field, so the piece's lower row starts visible.
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
-/// A piece whose spawn is blocked tries this many rows higher (into the buffer above the
-/// field) before it counts as a block out.
-const SPAWN_LIFT: i32 = 2;
+
+/// Keys held as a piece spawns (initial rotation / initial hold, "IRS" / "IHS"): the new
+/// piece spawns already rotated or swapped with hold, which can dodge a block out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Initial {
+    /// Some(true) = clockwise, Some(false) = counter-clockwise.
+    pub rotate: Option<bool>,
+    pub hold: bool,
+}
 
 /// Garbage lines sent per clear, indexed by lines cleared.
 const LINE_ATTACK: [u32; 5] = [0, 0, 1, 2, 4];
@@ -148,6 +154,8 @@ pub struct Game {
     /// Multiplies gravity speed (battle abilities use this). 1.0 = normal.
     pub gravity_scale: f32,
     pub stats: Stats,
+    /// IRS / IHS keys held right now (set by the input layer each frame).
+    pub initial: Initial,
     bag: Bag,
     pending_garbage: VecDeque<Garbage>,
     garbage_rng: Rng,
@@ -191,6 +199,7 @@ impl Game {
             game_over: false,
             gravity_scale: 1.0,
             stats: Stats::default(),
+            initial: Initial::default(),
             bag,
             pending_garbage: VecDeque::new(),
             garbage_rng: Rng::new(seed.rotate_left(17) ^ 0x6A4B_A6E5),
@@ -413,24 +422,41 @@ impl Game {
         kind
     }
 
-    /// Spawns `kind`. The field goes on above the visible rows (a buffer, as in
-    /// competitive stackers): a spawn blocked by a tall stack moves up into it, and only
-    /// when there is no room even there is it a block out.
+    /// Spawns `kind` (block out if it can't). With `initial`, held IRS / IHS keys apply as
+    /// it appears: hold swaps it first, rotate turns it (with kicks), so a blocked spawn can
+    /// still be saved.
     fn spawn(&mut self, kind: PieceKind) {
-        let y = (0..=SPAWN_LIFT).map(|lift| SPAWN_Y - lift).find(|&y| self.board.fits(kind, 0, SPAWN_X, y));
+        self.spawn_with(kind, false);
+    }
+
+    fn spawn_with(&mut self, mut kind: PieceKind, initial: bool) {
+        if initial && self.initial.hold && !self.hold_used {
+            kind = match self.hold.replace(kind) {
+                Some(held) => held,
+                None => self.pop_next(),
+            };
+            self.hold_used = true;
+            self.events.push(Event::Held);
+        }
         self.active = Active {
             kind,
             rot: 0,
             x: SPAWN_X,
-            y: y.unwrap_or(SPAWN_Y),
+            y: SPAWN_Y,
         };
         self.gravity_acc = 0.0;
         self.lock_timer = 0.0;
         self.lock_resets = 0;
-        self.lowest_y = self.active.y;
+        self.lowest_y = SPAWN_Y;
         self.last_move_was_rotation = false;
-        // Block out: no room to spawn anywhere.
-        if y.is_some() {
+        let mut fits = self.board.fits(kind, 0, SPAWN_X, SPAWN_Y);
+        if let (true, Some(cw)) = (initial, self.initial.rotate) {
+            let before = self.active.rot;
+            self.rotate(cw);
+            fits |= self.active.rot != before;
+        }
+        // Block out: no room to spawn.
+        if fits {
             self.events.push(Event::Spawned);
         } else {
             self.end_game();
@@ -462,8 +488,10 @@ impl Game {
         self.board.place(piece.kind, piece.rot, piece.x, piece.y);
         self.events.push(Event::Locked { piece });
 
-        // No lock out: a piece may rest in the buffer above the visible field. The game
-        // ends on a block out (next piece can't spawn) or garbage pushing blocks off the top.
+        // The field goes on above the visible rows (garbage can push the stack up there),
+        // but a piece locked entirely above them is a lock out, unless it clears a line
+        // (a clutch clear).
+        let above = piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32);
 
         self.stats.pieces += 1;
         let rows = self.board.full_rows();
@@ -475,6 +503,10 @@ impl Game {
             .count() as u32;
         self.board.remove_rows(&rows);
         self.score_clear(rows, snapshot, t_spin);
+        if above && cleared == 0 {
+            self.end_game();
+            return;
+        }
 
         // Garbage only rises when the lock didn't clear anything.
         if cleared == 0 && !self.raise_garbage() {
@@ -484,7 +516,7 @@ impl Game {
 
         self.hold_used = false;
         let kind = self.pop_next();
-        self.spawn(kind);
+        self.spawn_with(kind, true);
     }
 
     /// Raises up to `MAX_GARBAGE_PER_LOCK` queued rows. False if that topped the player out.
@@ -602,7 +634,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Cell, TOTAL_ROWS};
+    use crate::board::{Cell, TOTAL_ROWS, VISIBLE_ROWS};
 
     fn game_with(kind: PieceKind) -> Game {
         let mut g = Game::new(1);
@@ -857,39 +889,82 @@ mod tests {
         assert_eq!(g.stats.time, 0.0);
     }
 
-    #[test]
-    fn locking_above_the_visible_field_is_not_a_top_out() {
-        let mut g = game_with(PieceKind::O);
-        // A column of blocks up to the top visible row under the spawn: the O lands in the buffer.
+    /// A full-height wall over columns 8-9 (clear of the spawn), with the O moved above it,
+    /// so a hard drop lands it on rows HIDDEN_ROWS-2 and -1: entirely above the field.
+    fn tower(g: &mut Game) {
         for y in HIDDEN_ROWS..TOTAL_ROWS {
-            for x in 4..6 {
+            for x in 8..10 {
+                g.board.set(x, y, PieceKind::J);
+            }
+        }
+        g.active.y = HIDDEN_ROWS as i32 - 5;
+        g.active.x = 7;
+    }
+
+    #[test]
+    fn locking_entirely_above_the_field_is_a_lock_out() {
+        let mut g = game_with(PieceKind::O);
+        tower(&mut g);
+        g.apply(Action::HardDrop);
+        assert!(g.game_over);
+    }
+
+    #[test]
+    fn a_clutch_clear_above_the_field_survives() {
+        let mut g = game_with(PieceKind::O);
+        tower(&mut g);
+        // The two rows the O lands in are full apart from its cells: it clears them.
+        for y in HIDDEN_ROWS - 2..HIDDEN_ROWS {
+            for x in 0..8 {
                 g.board.set(x, y, PieceKind::J);
             }
         }
         g.apply(Action::HardDrop);
-        assert!(!g.game_over, "a lock in the buffer shouldn't end the game");
-        assert!((0..WIDTH).any(|x| g.board.get(x, HIDDEN_ROWS - 1).is_some()), "the O sits above the field");
+        assert!(!g.game_over, "a lock out that clears lines is a clutch clear");
     }
 
     #[test]
-    fn a_blocked_spawn_moves_up_before_it_tops_out() {
-        let mut g = game_with(PieceKind::O);
-        // Block the normal spawn rows only.
-        for x in 0..WIDTH {
-            g.board.set(x, SPAWN_Y as usize + 1, PieceKind::J);
-        }
-        g.spawn(PieceKind::T);
+    fn garbage_can_push_the_stack_into_the_buffer_without_ending() {
+        let mut g = game_with(PieceKind::I);
+        assert!(g.board.push_garbage(VISIBLE_ROWS + 4, 0));
         assert!(!g.game_over);
-        assert!(g.active.y < SPAWN_Y, "spawned higher, at {}", g.active.y);
-        // With the buffer full too, it's a block out.
-        let mut g = game_with(PieceKind::O);
-        for y in 0..(SPAWN_Y as usize + 2) {
-            for x in 0..WIDTH {
-                g.board.set(x, y, PieceKind::J);
+    }
+
+    #[test]
+    fn a_blocked_spawn_is_a_block_out_unless_irs_saves_it() {
+        // Block the row a flat piece spawns in, but leave room for it standing up.
+        // A one-wide gap in column 5, where a clockwise I stands.
+        let block = |g: &mut Game| {
+            for x in (0..WIDTH).filter(|&x| x != 5) {
+                g.board.set(x, SPAWN_Y as usize + 1, PieceKind::J);
             }
-        }
-        g.spawn(PieceKind::T);
-        assert!(g.game_over);
+            for y in SPAWN_Y as usize + 2..TOTAL_ROWS {
+                for x in (0..WIDTH).filter(|&x| x != 5) {
+                    g.board.set(x, y, PieceKind::J);
+                }
+            }
+        };
+        let mut g = game_with(PieceKind::O);
+        block(&mut g);
+        g.spawn_with(PieceKind::I, true);
+        assert!(g.game_over, "flat I has no room: block out");
+
+        let mut g = game_with(PieceKind::O);
+        block(&mut g);
+        g.initial = Initial { rotate: Some(true), hold: false };
+        g.spawn_with(PieceKind::I, true);
+        assert!(!g.game_over, "initial rotation stands the I up into the gap");
+        assert_eq!(g.active.rot, 1);
+    }
+
+    #[test]
+    fn initial_hold_swaps_the_spawning_piece() {
+        let mut g = game_with(PieceKind::O);
+        g.hold = Some(PieceKind::T);
+        g.initial = Initial { rotate: None, hold: true };
+        g.apply(Action::HardDrop);
+        assert_eq!(g.active.kind, PieceKind::T, "spawned the held piece");
+        assert!(g.hold_used);
     }
 
     #[test]
