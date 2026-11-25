@@ -12,6 +12,8 @@ use crate::piece::PieceKind;
 use crate::stats::{self, Stats};
 use crate::bot::Profile;
 use crate::versus::{Phase as VsPhase, Versus};
+use crate::progress::{self, Progress, Reward};
+use crate::skins::{self, BlockStyle, Item, ThemeColors};
 
 /// Virtual canvas width for Classic and the menu; Battler adds the monster panel.
 const CLASSIC_W: f32 = 760.0;
@@ -46,16 +48,24 @@ pub fn cell_color(cell: Cell) -> Color {
     }
 }
 
+/// A piece's colour in the equipped palette.
 pub fn piece_color(kind: PieceKind) -> Color {
-    match kind {
-        PieceKind::I => hex(0x2ee6d6),
-        PieceKind::O => hex(0xffd23f),
-        PieceKind::T => hex(0xc061ff),
-        PieceKind::S => hex(0x5cdb5c),
-        PieceKind::Z => hex(0xff4f6d),
-        PieceKind::J => hex(0x4f8bff),
-        PieceKind::L => hex(0xff9a3c),
-    }
+    let colors = skins::current().palette.colors();
+    let i = match kind {
+        PieceKind::I => 0,
+        PieceKind::O => 1,
+        PieceKind::T => 2,
+        PieceKind::S => 3,
+        PieceKind::Z => 4,
+        PieceKind::J => 5,
+        PieceKind::L => 6,
+    };
+    hex(colors[i])
+}
+
+/// The equipped board theme's colours.
+fn theme() -> ThemeColors {
+    skins::current().theme.colors()
 }
 
 /// Maps virtual coordinates to screen pixels, plus a shake offset (virtual px).
@@ -149,10 +159,161 @@ impl View {
         self.text_mixed(t, right - self.measure_mixed(t, size), y, size, c);
     }
 
+    fn triangle(&self, a: Vec2, b: Vec2, c: Vec2, color: Color) {
+        let s = self.scale;
+        let o = vec2(self.ox, self.oy);
+        draw_triangle(o + a * s, o + b * s, o + c * s, color);
+    }
+
+    /// A frame of thickness `t` just inside the rectangle.
+    fn frame(&self, x: f32, y: f32, w: f32, h: f32, t: f32, c: Color) {
+        self.rect(x, y, w, t, c);
+        self.rect(x, y + h - t, w, t, c);
+        self.rect(x, y + t, t, h - 2.0 * t, c);
+        self.rect(x + w - t, y + t, t, h - 2.0 * t, c);
+    }
+
+    /// A rectangle with rounded corners of radius `r`.
+    fn rounded(&self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) {
+        self.rect(x + r, y, w - 2.0 * r, h, c);
+        self.rect(x, y + r, r, h - 2.0 * r, c);
+        self.rect(x + w - r, y + r, r, h - 2.0 * r, c);
+        for (cx, cy) in [(x + r, y + r), (x + w - r, y + r), (x + r, y + h - r), (x + w - r, y + h - r)] {
+            self.circle(cx, cy, r, c);
+        }
+    }
+
+    /// One block in the equipped style.
     pub fn block(&self, x: f32, y: f32, size: f32, c: Color) {
-        self.rect(x, y, size, size, shade(c, 0.55));
-        self.rect(x + 2.0, y + 2.0, size - 4.0, size - 4.0, c);
-        self.rect(x + 2.0, y + 2.0, size - 4.0, (size - 4.0) * 0.22, shade(c, 1.25));
+        self.block_styled(skins::current().style, x, y, size, c);
+    }
+
+    /// One block in `style`. Every style is still: nothing here depends on time.
+    pub fn block_styled(&self, style: BlockStyle, x: f32, y: f32, size: f32, c: Color) {
+        let a = c.a;
+        let lift = |f: f32| with_alpha(mix_colors(c, WHITE, f), a);
+        // Edge thickness that stays visible on the small queue / opponent cells.
+        let edge = (size / 16.0).max(1.0);
+        match style {
+            BlockStyle::Classic => {
+                self.rect(x, y, size, size, shade(c, 0.55));
+                self.rect(x + 2.0, y + 2.0, size - 4.0, size - 4.0, c);
+                self.rect(x + 2.0, y + 2.0, size - 4.0, (size - 4.0) * 0.22, shade(c, 1.25));
+            }
+            BlockStyle::Flat => {
+                self.rect(x + edge * 0.5, y + edge * 0.5, size - edge, size - edge, c);
+            }
+            BlockStyle::Outline => {
+                let t = (size / 11.0).max(1.0);
+                self.rect(x + t, y + t, size - 2.0 * t, size - 2.0 * t, with_alpha(c, 0.16 * a));
+                self.frame(x + edge, y + edge, size - 2.0 * edge, size - 2.0 * edge, t, c);
+            }
+            BlockStyle::Glossy => {
+                let r = size * 0.22;
+                let m = edge * 0.75;
+                let (w, h) = (size - 2.0 * m, size - 2.0 * m);
+                self.rounded(x + m, y + m, w, h, r, shade(c, 0.72));
+                self.rounded(x + m, y + m, w, h * 0.86, r, c);
+                // The shine: a soft band near the top and a bright glint.
+                let sx = x + m + w * 0.16;
+                self.rounded(sx, y + m + h * 0.1, w * 0.68, h * 0.26, (h * 0.13).min(r), with_alpha(WHITE, 0.32 * a));
+                self.circle(x + m + w * 0.26, y + m + h * 0.23, size * 0.06, with_alpha(WHITE, 0.75 * a));
+            }
+            BlockStyle::Pixel => {
+                let p = (size / 8.0).round().max(1.0);
+                self.rect(x, y, size, size, shade(c, 0.35));
+                self.rect(x + p, y + p, size - 2.0 * p, size - 2.0 * p, c);
+                // Light top-left, dark bottom-right, in whole "pixels".
+                self.rect(x + p, y + p, size - 2.0 * p, p, lift(0.45));
+                self.rect(x + p, y + 2.0 * p, p, size - 3.0 * p, lift(0.45));
+                self.rect(x + p, y + size - 2.0 * p, size - 2.0 * p, p, shade(c, 0.62));
+                self.rect(x + size - 2.0 * p, y + 2.0 * p, p, size - 4.0 * p, shade(c, 0.62));
+                self.rect(x + 2.0 * p, y + 2.0 * p, p, p, with_alpha(WHITE, a));
+            }
+            BlockStyle::Neon => {
+                let t = (size / 10.0).max(1.0);
+                self.rect(x, y, size, size, with_alpha(c, 0.16 * a));
+                self.rect(x + t, y + t, size - 2.0 * t, size - 2.0 * t, with_alpha(shade(c, 0.22), a));
+                self.frame(x + t, y + t, size - 2.0 * t, size - 2.0 * t, t, lift(0.3));
+                let i = 2.5 * t;
+                self.frame(x + i, y + i, size - 2.0 * i, size - 2.0 * i, (t * 0.5).max(1.0), with_alpha(c, 0.45 * a));
+            }
+            BlockStyle::Deon => {
+                let green = with_alpha(hex(0x5cdb5c), a);
+                self.rect(x, y, size, size, with_alpha(hex(0x081a0e), a));
+                self.frame(x + edge * 0.5, y + edge * 0.5, size - edge, size - edge, edge, with_alpha(green, 0.85 * a));
+                // Traces from the chip out to the edges, and the chip itself.
+                let mid = size / 2.0;
+                let tw = (size / 18.0).max(1.0);
+                self.rect(x + mid - tw / 2.0, y + edge, tw, size - 2.0 * edge, with_alpha(green, 0.45 * a));
+                self.rect(x + edge, y + mid - tw / 2.0, size - 2.0 * edge, tw, with_alpha(green, 0.45 * a));
+                let chip = size * 0.5;
+                let o = (size - chip) / 2.0;
+                self.rect(x + o - edge, y + o - edge, chip + 2.0 * edge, chip + 2.0 * edge, green);
+                self.rect(x + o, y + o, chip, chip, c);
+                self.rect(x + o, y + o, chip, chip * 0.25, lift(0.3));
+            }
+            BlockStyle::Crystal => {
+                let m = edge * 0.5;
+                let (x0, y0, x1, y1) = (x + m, y + m, x + size - m, y + size - m);
+                let (i0, i1) = (size * 0.28, size * 0.72);
+                let (tl, tr, bl, br) = (vec2(x0, y0), vec2(x1, y0), vec2(x0, y1), vec2(x1, y1));
+                let (itl, itr, ibl, ibr) = (vec2(x + i0, y + i0), vec2(x + i1, y + i0), vec2(x + i0, y + i1), vec2(x + i1, y + i1));
+                let facets = [
+                    ([tl, tr, itr, itl], lift(0.45)),
+                    ([tl, itl, ibl, bl], lift(0.15)),
+                    ([tr, br, ibr, itr], shade(c, 0.75)),
+                    ([bl, ibl, ibr, br], shade(c, 0.55)),
+                ];
+                for ([p0, p1, p2, p3], col) in facets {
+                    self.triangle(p0, p1, p2, col);
+                    self.triangle(p0, p2, p3, col);
+                }
+                self.rect(x + i0, y + i0, i1 - i0, i1 - i0, c);
+                self.triangle(itl, itr, ibl, lift(0.12));
+            }
+        }
+    }
+
+    /// Where the falling piece will land, in the equipped style.
+    pub fn ghost(&self, x: f32, y: f32, size: f32, c: Color) {
+        let style = skins::current().style;
+        let t = (size / 16.0).max(1.0);
+        let m = t;
+        let (gx, gy, g) = (x + m, y + m, size - 2.0 * m);
+        match style {
+            BlockStyle::Flat => self.rect(gx, gy, g, g, with_alpha(c, 0.24)),
+            BlockStyle::Outline | BlockStyle::Pixel => {
+                // Corner brackets.
+                let k = g * 0.32;
+                let w = 2.0 * t;
+                let col = with_alpha(c, 0.6);
+                self.rect(gx, gy, g, g, with_alpha(c, 0.06));
+                for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
+                    let hx = if left { gx } else { gx + g - k };
+                    let vx = if left { gx } else { gx + g - w };
+                    let hy = if top { gy } else { gy + g - w };
+                    let vy = if top { gy } else { gy + g - k };
+                    self.rect(hx, hy, k, w, col);
+                    self.rect(vx, vy, w, k, col);
+                }
+            }
+            BlockStyle::Neon => {
+                self.rect(gx, gy, g, g, with_alpha(c, 0.08));
+                self.frame(gx - t, gy - t, g + 2.0 * t, g + 2.0 * t, t, with_alpha(c, 0.22));
+                self.frame(gx, gy, g, g, t * 1.5, with_alpha(mix_colors(c, WHITE, 0.3), 0.7));
+            }
+            BlockStyle::Deon => {
+                self.rect(gx, gy, g, g, with_alpha(hex(0x5cdb5c), 0.08));
+                self.frame(gx, gy, g, g, t * 1.5, with_alpha(hex(0x5cdb5c), 0.5));
+                let chip = size * 0.3;
+                self.frame(x + (size - chip) / 2.0, y + (size - chip) / 2.0, chip, chip, t, with_alpha(c, 0.6));
+            }
+            BlockStyle::Classic | BlockStyle::Glossy | BlockStyle::Crystal => {
+                self.rect(gx, gy, g, g, with_alpha(c, 0.12));
+                self.outline(gx, gy, g, g, t, with_alpha(c, 0.5));
+            }
+        }
     }
 }
 
@@ -217,15 +378,18 @@ fn draw_piece_sized(v: &View, kind: PieceKind, cx: f32, cy: f32, mini: f32, colo
 
 fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
     v.text(label, x, y - 8.0, 22.0, hex(0x9aa3b8));
-    v.rect(x, y, w, h, hex(0x141824));
-    v.outline(x, y, w, h, 2.0, hex(0x262c3d));
+    let t = theme();
+    v.rect(x, y, w, h, hex(t.panel));
+    v.outline(x, y, w, h, 2.0, hex(t.panel_line));
 }
 
-pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&Battle>, versus: Option<&Versus>) {
-    clear_background(hex(0x0b0d14));
+/// A play session. `reward` is what the finished run earned (shown on the results).
+pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&Battle>, versus: Option<&Versus>, reward: Option<&Reward>) {
+    let theme = theme();
+    clear_background(hex(theme.backdrop));
     let width = if battle.is_some() || versus.is_some() { BATTLE_W } else { CLASSIC_W };
     let v = View::fit_window(fx.shake_offset(), width);
-    let field_bg = hex(0x10131c);
+    let field_bg = hex(theme.field);
     // Motion off: nothing on screen moves on its own.
     let still = !fx.motion().animated();
 
@@ -236,7 +400,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     let red = hex(0xff3b4f);
 
     // Field frame (flashes with the last clear's colour, red in danger) and background.
-    let frame = mix_colors(fx.border_color(hex(0x262c3d)), red, danger * (0.45 + 0.55 * pulse));
+    let frame = mix_colors(fx.border_color(hex(theme.frame)), red, danger * (0.45 + 0.55 * pulse));
     if danger > 0.0 {
         // A soft red glow around the field.
         for (i, a) in [(14.0, 0.06), (9.0, 0.1), (5.0, 0.16)] {
@@ -245,7 +409,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     }
     v.rect(BOARD_X - 4.0, BOARD_Y - 4.0, BOARD_W + 8.0, BOARD_H + 8.0, frame);
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, mix_colors(field_bg, red, 0.12 * danger * (0.5 + 0.5 * pulse)));
-    let grid = hex(0x181c28);
+    let grid = hex(theme.grid);
     for x in 1..WIDTH {
         v.rect(BOARD_X + x as f32 * CELL, BOARD_Y, 1.0, BOARD_H, grid);
     }
@@ -294,8 +458,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         for (cx, cy) in a.kind.cells(a.rot) {
             if show_ghost && drawable_row(ghost_y + cy) {
                 let (px, py) = cell_pos(a.x + cx, ghost_y + cy);
-                v.rect(px + 2.0, py + 2.0, CELL - 4.0, CELL - 4.0, with_alpha(color, 0.12));
-                v.outline(px + 2.0, py + 2.0, CELL - 4.0, CELL - 4.0, 2.0, with_alpha(color, 0.5));
+                v.ghost(px, py, CELL, color);
             }
         }
         // Dims as the lock delay runs out, so "about to stick" is readable.
@@ -411,7 +574,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     // Overlays.
     if let Some(vs) = versus {
         match vs.phase {
-            VsPhase::Over { player_won } if fx.death_done() => draw_versus_results(&v, vs, player_won, &game.stats),
+            VsPhase::Over { player_won } if fx.death_done() => draw_versus_results(&v, vs, player_won, &game.stats, reward),
             VsPhase::Over { .. } => {}
             VsPhase::Countdown { left } => draw_countdown(&v, vs, left, still),
             VsPhase::Fighting if paused => draw_pause(&v),
@@ -422,8 +585,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     }
     match battle {
         _ if !fx.death_done() => {}
-        Some(b) if b.over() || game.game_over => draw_battle_results(&v, b, &game.stats),
-        _ if game.game_over => draw_classic_results(&v, game),
+        Some(b) if b.over() || game.game_over => draw_battle_results(&v, b, &game.stats, reward),
+        _ if game.game_over => draw_classic_results(&v, game, reward),
         _ if paused => draw_pause(&v),
         _ => {}
     }
@@ -668,27 +831,61 @@ fn draw_battle_panel(v: &View, b: &Battle, still: bool) {
     v.text(&b.total_damage.to_string(), x + 160.0, stats_y + 32.0, 34.0, WHITE);
 }
 
-fn draw_battle_results(v: &View, b: &Battle, stats: &Stats) {
+fn draw_battle_results(v: &View, b: &Battle, stats: &Stats, reward: Option<&Reward>) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.78));
     let title = match b.phase {
         Phase::Over(Defeat::Timeout) => "TIME UP",
         _ => "TOPPED OUT",
     };
-    v.text_centered(title, cx, BOARD_Y + 200.0, 52.0, hex(0xff4f6d));
+    v.text_centered(title, cx, BOARD_Y + 110.0, 52.0, hex(0xff4f6d));
     let lines = [
         ("monsters defeated", b.defeated.to_string()),
         ("total damage", b.total_damage.to_string()),
         ("fell to", format!("{} (lv {})", b.monster.title(), b.monster.tier)),
     ];
     for (i, (label, value)) in lines.iter().enumerate() {
-        let y = BOARD_Y + 260.0 + i as f32 * 58.0;
+        let y = BOARD_Y + 160.0 + i as f32 * 54.0;
         v.text_centered(label, cx, y, 20.0, hex(0x9aa3b8));
         v.text_centered(value, cx, y + 28.0, 28.0, WHITE);
     }
     let rows = summary_rows(stats);
-    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 450.0, &rows[2..8], 24.0, 18.0);
-    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 615.0, 20.0, hex(0x9aa3b8));
+    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 340.0, &rows[2..8], 24.0, 18.0);
+    if let Some(r) = reward {
+        draw_reward(v, r, BOARD_Y + 490.0);
+    }
+    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 628.0, 20.0, hex(0x9aa3b8));
+}
+
+/// XP earned, the level bar, records and new unlocks, in a block starting at `top`
+/// (about 100 tall) across the field.
+fn draw_reward(v: &View, r: &Reward, top: f32) {
+    let cx = BOARD_X + BOARD_W / 2.0;
+    let gold = hex(0xffd23f);
+    let (left, w) = (BOARD_X + 30.0, BOARD_W - 60.0);
+    v.rect(left - 10.0, top - 4.0, w + 20.0, 1.0, hex(0x3d4458));
+    v.text(&format!("+{} XP", r.xp), left, top + 22.0, 24.0, gold);
+    let level = if r.leveled_up() { format!("LEVEL UP!  {}", r.level) } else { format!("LEVEL {}", r.level) };
+    v.text_right(&level, left + w, top + 22.0, 22.0, if r.leveled_up() { gold } else { WHITE });
+    bar(v, left, top + 30.0, w, 8.0, r.into as f32 / r.need.max(1) as f32, gold);
+    let mut y = top + 60.0;
+    if !r.records.is_empty() {
+        v.text_centered(&r.records.join("  ·  "), cx, y, 18.0, hex(0x7fd8ff));
+        y += 24.0;
+    }
+    match r.unlocks.as_slice() {
+        [] => {}
+        [one] => {
+            v.text_centered("NEW UNLOCK", cx, y, 18.0, hex(0xff9a3c));
+            v.text_centered(&format!("{} {}", one.name(), one.kind()), cx, y + 24.0, 22.0, WHITE);
+        }
+        many => {
+            v.text_centered(&format!("{} NEW UNLOCKS", many.len()), cx, y, 18.0, hex(0xff9a3c));
+            let names: Vec<&str> = many.iter().take(3).map(|i| i.name()).collect();
+            let more = if many.len() > 3 { format!(" +{}", many.len() - 3) } else { String::new() };
+            v.text_centered(&format!("{}{more}", names.join(", ")), cx, y + 24.0, 20.0, WHITE);
+        }
+    }
 }
 
 /// Label on the left, value right-aligned: a compact table.
@@ -718,15 +915,18 @@ fn summary_rows(s: &Stats) -> Vec<(&'static str, String)> {
     ]
 }
 
-fn draw_classic_results(v: &View, game: &Game) {
+fn draw_classic_results(v: &View, game: &Game, reward: Option<&Reward>) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
     v.text_centered("GAME OVER", cx, BOARD_Y + 90.0, 52.0, WHITE);
     v.text_centered("score", cx, BOARD_Y + 140.0, 20.0, hex(0x9aa3b8));
     v.text_centered(&game.score.to_string(), cx, BOARD_Y + 178.0, 38.0, hex(0xffd23f));
     let rows = summary_rows(&game.stats);
-    stat_rows(v, BOARD_X + 30.0, BOARD_X + BOARD_W - 30.0, BOARD_Y + 230.0, &rows, 30.0, 20.0);
-    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 615.0, 20.0, hex(0x9aa3b8));
+    stat_rows(v, BOARD_X + 30.0, BOARD_X + BOARD_W - 30.0, BOARD_Y + 214.0, &rows, 24.0, 19.0);
+    if let Some(r) = reward {
+        draw_reward(v, r, BOARD_Y + 494.0);
+    }
+    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 628.0, 20.0, hex(0x9aa3b8));
 }
 
 fn draw_pause(v: &View) {
@@ -813,7 +1013,7 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     let beat = if still { 0.6 } else { 0.5 + 0.5 * (get_time() as f32 * (4.0 + 7.0 * their_danger)).sin() };
     let frame = if lost { hex(0x4a5064) } else { mix_colors(with_alpha(accent, 0.55), hex(0xff3b4f), their_danger * (0.45 + 0.55 * beat)) };
     v.rect(OPP_X - 3.0, OPP_Y - 3.0, bw + 6.0, bh + 6.0, frame);
-    v.rect(OPP_X, OPP_Y, bw, bh, hex(0x10131c));
+    v.rect(OPP_X, OPP_Y, bw, bh, hex(theme().field));
     let cell = |x: i32, y: i32| (OPP_X + x as f32 * OPP_CELL, OPP_Y + (y - HIDDEN_ROWS as i32) as f32 * OPP_CELL);
     for y in HIDDEN_ROWS..TOTAL_ROWS {
         for x in 0..WIDTH {
@@ -830,7 +1030,7 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
         for (cx, cy) in a.kind.cells(a.rot) {
             if ghost + cy >= HIDDEN_ROWS as i32 {
                 let (px, py) = cell(a.x + cx, ghost + cy);
-                v.outline(px + 2.0, py + 2.0, OPP_CELL - 4.0, OPP_CELL - 4.0, 1.5, with_alpha(color, 0.4));
+                v.ghost(px, py, OPP_CELL, color);
             }
         }
         for (x, y) in a.cells() {
@@ -992,7 +1192,7 @@ fn draw_go(v: &View, vs: &Versus) {
     v.text_centered("GO!", cx, BOARD_Y + BOARD_H / 2.0 + 30.0, 90.0 + 40.0 * k, with_alpha(hex(0xffd23f), 1.0 - k));
 }
 
-fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
+fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats, reward: Option<&Reward>) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
     let (title, color) = if won { ("VICTORY", hex(0xffd23f)) } else { ("DEFEAT", hex(0xff4f6d)) };
@@ -1019,16 +1219,19 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
         ("max combo", mine.max_combo.to_string(), theirs.max_combo.to_string()),
     ];
     for (i, (label, a, b)) in rows.iter().enumerate() {
-        let y = top + 36.0 + i as f32 * 32.0;
+        let y = top + 36.0 + i as f32 * 30.0;
         v.text(label, left, y, 20.0, hex(0x9aa3b8));
         v.text_right(a, mid, y, 20.0, WHITE);
         v.text_right(b, right, y, 20.0, WHITE);
     }
-    v.text_centered("Enter rematch   ·   Esc menu", cx, BOARD_Y + 615.0, 20.0, hex(0x9aa3b8));
+    if let Some(r) = reward {
+        draw_reward(v, r, BOARD_Y + 494.0);
+    }
+    v.text_centered("Enter rematch   ·   Esc menu", cx, BOARD_Y + 628.0, 20.0, hex(0x9aa3b8));
 }
 
 /// The opponent select screen: one row per shadow (keyboard or mouse), details below.
-pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>) {
+pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>, progress: &Progress) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     let cx = CLASSIC_W / 2.0;
@@ -1044,19 +1247,42 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
         v.rect(r.x, r.y, 6.0, r.h, accent);
         let face = r.h - 16.0;
         draw_portrait(&v, p, r.x + 18.0, r.y + 8.0, face, if active { WHITE } else { Color::new(0.7, 0.7, 0.75, 1.0) });
-        v.text_mixed(p.name, r.x + 30.0 + face, r.y + r.h / 2.0 + 11.0, if p.name.chars().count() > 8 { 26.0 } else { 32.0 }, if active { WHITE } else { hex(0x9aa3b8) });
+        let name_x = r.x + 30.0 + face;
+        v.text_mixed(p.name, name_x, r.y + 27.0, if p.name.chars().count() > 8 { 24.0 } else { 28.0 }, if active { WHITE } else { hex(0x9aa3b8) });
+        // Your record against them, under the name.
+        let rec = progress.record(p.portrait);
+        let (line, color) = match (rec.wins + rec.losses, rec.best_time) {
+            (0, _) => ("not fought yet".to_owned(), hex(0x5d6680)),
+            (_, Some(t)) => (format!("{}W-{}L  ·  best {}", rec.wins, rec.losses, stats::clock(t)), hex(0xffd23f)),
+            (_, None) => (format!("{}W-{}L", rec.wins, rec.losses), hex(0x9aa3b8)),
+        };
+        v.text(&line, name_x, r.y + 44.0, 16.0, color);
         v.text_right(p.rank, r.right() - 20.0, r.y + 21.0, 19.0, accent);
         v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 40.0, 17.0, hex(0x9aa3b8));
     }
     if let Some(p) = shadows.get(selected) {
-        let y = select_item_rect(shadows.len()).y + 16.0;
+        let y = select_item_rect(shadows.len()).y + 14.0;
         v.text_centered(p.blurb, cx, y, 20.0, hex(0x9aa3b8));
+        // Your bests against them, and what beating them unlocks.
+        let rec = progress.record(p.portrait);
+        let mut bits = Vec::new();
+        if let Some(apm) = rec.best_apm {
+            bits.push(format!("best APM {apm:.1}"));
+        }
+        if let Some(pps) = rec.best_pps {
+            bits.push(format!("best PPS {pps:.2}"));
+        }
+        if let Some(item) = Item::all().find(|&i| i.unlock() == skins::Unlock::Beat(p.portrait)) {
+            let got = if progress.unlocked(item) { "unlocked" } else { "beat them to unlock" };
+            bits.push(format!("{} {}: {got}", item.name(), item.kind()));
+        }
+        v.text_centered(&bits.join("  ·  "), cx, y + 24.0, 18.0, hex(0x7fd8ff));
     }
     v.text_centered("Up/Down or mouse to choose  ·  Enter or click to fight  ·  Esc back", cx, 712.0, 18.0, hex(0x5d6680));
 }
 
 fn select_item_rect(i: usize) -> Rect {
-    Rect::new(CLASSIC_W / 2.0 - 230.0, 196.0 + i as f32 * 58.0, 460.0, 52.0)
+    Rect::new(CLASSIC_W / 2.0 - 230.0, 182.0 + i as f32 * 56.0, 460.0, 50.0)
 }
 
 /// Which shadow (if any) is under `screen_pos` on the select screen.
@@ -1072,8 +1298,8 @@ pub struct MenuItem {
 
 // Menu layout, shared by drawing and mouse hit-testing (virtual coordinates).
 const MENU_ITEM_W: f32 = 420.0;
-const MENU_ITEM_H: f32 = 64.0;
-const MENU_ITEM_GAP: f32 = 18.0;
+const MENU_ITEM_H: f32 = 56.0;
+const MENU_ITEM_GAP: f32 = 14.0;
 const MENU_TOP: f32 = 270.0;
 const TOGGLE_W: f32 = 200.0;
 const TOGGLE_H: f32 = 40.0;
@@ -1098,7 +1324,7 @@ fn menu_item_rect(i: usize) -> Rect {
 
 /// The blurb sits under the items; the toggles sit under the blurb.
 fn menu_toggle_rect(items: usize, which: MenuHit) -> Rect {
-    let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 60.0;
+    let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 50.0;
     let left = CLASSIC_W / 2.0 - TOGGLE_W - TOGGLE_GAP / 2.0;
     let x = if which == MenuHit::Motion { left } else { left + TOGGLE_W + TOGGLE_GAP };
     Rect::new(x, y, TOGGLE_W, TOGGLE_H)
@@ -1127,21 +1353,22 @@ pub fn menu_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
         })
 }
 
-pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, motion: Motion) {
+pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, motion: Motion, progress: &Progress) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     let cx = CLASSIC_W / 2.0;
 
     // A few static blocks as backdrop, one of each piece colour.
     for (i, kind) in PieceKind::ALL.iter().enumerate() {
-        let x = 60.0 + i as f32 * 95.0;
-        let y = 640.0 + (i % 2) as f32 * 30.0;
+        // Down both sides, clear of the menu column.
+        let (x, y) = if i < 4 { (82.0, 300.0 + i as f32 * 105.0) } else { (678.0, 352.0 + (i - 4) as f32 * 105.0) };
         draw_mini_piece(&v, *kind, x, y, with_alpha(piece_color(*kind), 0.25));
     }
 
     v.text_centered("BLOCK", cx - 95.0, 170.0, 76.0, hex(0xffd23f));
     v.text_centered("BRAWL", cx + 105.0, 170.0, 76.0, hex(0xff4f6d));
     v.text_centered("a falling-block battler", cx, 210.0, 22.0, hex(0x5d6680));
+    draw_level_bar(&v, progress, cx, 242.0);
 
     for (i, item) in items.iter().enumerate() {
         let r = menu_item_rect(i);
@@ -1179,9 +1406,262 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
     v.text_centered("made by xSolstice1  ·  github.com/xSolstice1", cx, 742.0, 16.0, hex(0x3d4458));
 }
 
+/// "LEVEL 4  ·  120 / 250 XP" over a slim bar, centred on `cx`.
+fn draw_level_bar(v: &View, progress: &Progress, cx: f32, y: f32) {
+    let (level, into, need) = progress::level_of(progress.xp);
+    let label = if level >= progress::MAX_LEVEL { format!("LEVEL {level}") } else { format!("LEVEL {level}  ·  {into} / {need} XP") };
+    v.text_centered(&label, cx, y, 18.0, hex(0x9aa3b8));
+    bar(v, cx - 110.0, y + 7.0, 220.0, 6.0, into as f32 / need.max(1) as f32, hex(0xffd23f));
+}
+
+// ───────────── Skins ─────────────
+
+/// The skins screen's columns: block styles, board themes, palettes.
+pub const SKIN_COLUMNS: [&str; 3] = ["BLOCKS", "BOARD", "COLOURS"];
+
+/// The items in column `col` of the skins screen.
+pub fn skin_column(col: usize) -> Vec<Item> {
+    match col {
+        0 => skins::BlockStyle::ALL.into_iter().map(Item::Style).collect(),
+        1 => skins::BoardTheme::ALL.into_iter().map(Item::Theme).collect(),
+        _ => skins::Palette::ALL.into_iter().map(Item::Palette).collect(),
+    }
+}
+
+/// Something clickable on the skins screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkinsHit {
+    Item { col: usize, row: usize },
+    Back,
+}
+
+const SKIN_COL_X: f32 = 28.0;
+const SKIN_COL_W: f32 = 128.0;
+const SKIN_COL_GAP: f32 = 10.0;
+const SKIN_TOP: f32 = 164.0;
+const SKIN_ROW_H: f32 = 34.0;
+const SKIN_ROW_GAP: f32 = 6.0;
+const SKIN_PREVIEW_X: f32 = 462.0;
+const PREVIEW_CELL: f32 = 18.0;
+const PREVIEW_ROWS: usize = 14;
+
+fn skin_item_rect(col: usize, row: usize) -> Rect {
+    Rect::new(
+        SKIN_COL_X + col as f32 * (SKIN_COL_W + SKIN_COL_GAP),
+        SKIN_TOP + row as f32 * (SKIN_ROW_H + SKIN_ROW_GAP),
+        SKIN_COL_W,
+        SKIN_ROW_H,
+    )
+}
+
+fn skin_back_rect() -> Rect {
+    Rect::new(SKIN_COL_X, 664.0, 120.0, 34.0)
+}
+
+/// What's under `screen_pos` on the skins screen.
+pub fn skins_hit(screen_pos: Vec2) -> Option<SkinsHit> {
+    let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
+    if skin_back_rect().contains(p) {
+        return Some(SkinsHit::Back);
+    }
+    (0..SKIN_COLUMNS.len())
+        .flat_map(|col| (0..skin_column(col).len()).map(move |row| (col, row)))
+        .find(|&(col, row)| skin_item_rect(col, row).contains(p))
+        .map(|(col, row)| SkinsHit::Item { col, row })
+}
+
+/// A sample stack for the preview: rows from the bottom up, `.` empty, `G` garbage.
+const PREVIEW_STACK: [&str; 6] = ["GGGG.GGGGG", "ILLSS.JZZ.", "IL.TTTJJZZ", "IL..T..OO.", "I......OO.", ".........."];
+
+fn preview_cell(ch: char) -> Option<Cell> {
+    let kind = match ch {
+        'I' => PieceKind::I,
+        'O' => PieceKind::O,
+        'T' => PieceKind::T,
+        'S' => PieceKind::S,
+        'Z' => PieceKind::Z,
+        'J' => PieceKind::J,
+        'L' => PieceKind::L,
+        'G' => return Some(Cell::Garbage),
+        _ => return None,
+    };
+    Some(Cell::Piece(kind))
+}
+
+/// A small still field in the current skin: a stack, a falling piece and its ghost, and a queue.
+fn draw_skin_preview(v: &View, x: f32, y: f32) {
+    let t = theme();
+    let (bw, bh) = (WIDTH as f32 * PREVIEW_CELL, PREVIEW_ROWS as f32 * PREVIEW_CELL);
+    v.rect(x - 3.0, y - 3.0, bw + 6.0, bh + 6.0, hex(t.frame));
+    v.rect(x, y, bw, bh, hex(t.field));
+    for c in 1..WIDTH {
+        v.rect(x + c as f32 * PREVIEW_CELL, y, 1.0, bh, hex(t.grid));
+    }
+    for r in 1..PREVIEW_ROWS {
+        v.rect(x, y + r as f32 * PREVIEW_CELL, bw, 1.0, hex(t.grid));
+    }
+    let at = |cx: i32, row_from_top: i32| (x + cx as f32 * PREVIEW_CELL, y + row_from_top as f32 * PREVIEW_CELL);
+    for (i, row) in PREVIEW_STACK.iter().enumerate() {
+        let r = PREVIEW_ROWS as i32 - 1 - i as i32;
+        for (cx, ch) in row.chars().enumerate() {
+            if let Some(cell) = preview_cell(ch) {
+                let (px, py) = at(cx as i32, r);
+                v.block(px, py, PREVIEW_CELL, cell_color(cell));
+            }
+        }
+    }
+    // A T falling into the slot, and where it will land.
+    let tee = [(1, 0), (0, 1), (1, 1), (2, 1)];
+    let color = piece_color(PieceKind::T);
+    let ghost_row = PREVIEW_ROWS as i32 - 6;
+    for (dx, dy) in tee {
+        let (px, py) = at(2 + dx, ghost_row + dy);
+        v.ghost(px, py, PREVIEW_CELL, color);
+        let (px, py) = at(2 + dx, 2 + dy);
+        v.block(px, py, PREVIEW_CELL, color);
+    }
+    // Hold and next, beside the field.
+    let side = x + bw + 16.0;
+    let (pw, ph) = (72.0, 54.0);
+    let muted = hex(0x9aa3b8);
+    v.text("HOLD", side, y + 12.0, 16.0, muted);
+    v.rect(side, y + 18.0, pw, ph, hex(t.panel));
+    v.outline(side, y + 18.0, pw, ph, 1.5, hex(t.panel_line));
+    draw_piece_sized(v, PieceKind::L, side + pw / 2.0, y + 18.0 + ph / 2.0, 12.0, piece_color(PieceKind::L));
+    let next_y = y + 96.0;
+    v.text("NEXT", side, next_y, 16.0, muted);
+    v.rect(side, next_y + 6.0, pw, 150.0, hex(t.panel));
+    v.outline(side, next_y + 6.0, pw, 150.0, 1.5, hex(t.panel_line));
+    for (i, kind) in [PieceKind::I, PieceKind::S, PieceKind::O].into_iter().enumerate() {
+        draw_piece_sized(v, kind, side + pw / 2.0, next_y + 34.0 + i as f32 * 46.0, 12.0, piece_color(kind));
+    }
+}
+
+/// The skins screen: three columns to choose from, a live preview of the focused item
+/// on top of what's equipped, and what the focused item needs if it's locked.
+pub fn draw_skins(progress: &Progress, col: usize, row: usize, hover: Option<SkinsHit>) {
+    let equipped = progress.skin;
+    let focused = skin_column(col).get(row).copied();
+    let preview = focused.map_or(equipped, |i| i.apply(equipped));
+    clear_background(hex(preview.theme.colors().backdrop));
+    let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    let cx = CLASSIC_W / 2.0;
+    v.text_centered("SKINS", cx, 66.0, 52.0, WHITE);
+    draw_level_bar(&v, progress, cx, 100.0);
+    let total = Item::all().count();
+    let owned = Item::all().filter(|&i| progress.unlocked(i)).count();
+    v.text_centered(&format!("{owned} / {total} unlocked"), cx, 136.0, 16.0, hex(0x5d6680));
+
+    for (c, title) in SKIN_COLUMNS.iter().enumerate() {
+        let head = skin_item_rect(c, 0);
+        v.text(title, head.x, head.y - 10.0, 20.0, if c == col { hex(0xffd23f) } else { hex(0x9aa3b8) });
+        for (r, item) in skin_column(c).into_iter().enumerate() {
+            let rect = skin_item_rect(c, r);
+            let active = c == col && r == row;
+            let hovered = hover == Some(SkinsHit::Item { col: c, row: r });
+            let unlocked = progress.unlocked(item);
+            let on = item.equipped_in(equipped);
+            v.rect(rect.x, rect.y, rect.w, rect.h, if active { hex(0x1c2234) } else { hex(0x141824) });
+            let line = if active { hex(0xffd23f) } else if hovered { hex(0x9aa3b8) } else if on { hex(0x5cdb5c) } else { hex(0x262c3d) };
+            v.outline(rect.x, rect.y, rect.w, rect.h, 2.0, line);
+            // A swatch of the item drawn in its own look.
+            let sw = rect.h - 14.0;
+            let (sx, sy) = (rect.x + 8.0, rect.y + 7.0);
+            skins::with(item.apply(equipped), || match item {
+                Item::Style(st) => v.block_styled(st, sx, sy, sw, piece_color(PieceKind::T)),
+                Item::Theme(th) => {
+                    let tc = th.colors();
+                    v.rect(sx, sy, sw, sw, hex(tc.frame));
+                    v.rect(sx + 2.0, sy + 2.0, sw - 4.0, sw - 4.0, hex(tc.field));
+                    v.rect(sx + sw / 2.0, sy + 2.0, 1.0, sw - 4.0, hex(tc.grid));
+                }
+                Item::Palette(_) => {
+                    for (k, kind) in [PieceKind::I, PieceKind::T, PieceKind::Z, PieceKind::O].into_iter().enumerate() {
+                        let h = sw / 2.0;
+                        v.rect(sx + (k % 2) as f32 * h, sy + (k / 2) as f32 * h, h, h, piece_color(kind));
+                    }
+                }
+            });
+            if !unlocked {
+                v.rect(sx, sy, sw, sw, Color::new(0.04, 0.05, 0.08, 0.7));
+                draw_lock(&v, sx + sw / 2.0, sy + sw / 2.0);
+            }
+            let text = if unlocked { if active { WHITE } else { hex(0x9aa3b8) } } else { hex(0x4a5064) };
+            v.text(item.name(), sx + sw + 8.0, rect.y + rect.h / 2.0 + 6.0, 17.0, text);
+            if on {
+                v.rect(rect.right() - 9.0, rect.y + rect.h / 2.0 - 3.0, 5.0, 6.0, hex(0x5cdb5c));
+            }
+        }
+    }
+
+    // The preview.
+    v.text("PREVIEW", SKIN_PREVIEW_X, SKIN_TOP - 10.0, 20.0, hex(0x9aa3b8));
+    skins::with(preview, || draw_skin_preview(&v, SKIN_PREVIEW_X, SKIN_TOP));
+
+    // About the focused item.
+    if let Some(item) = focused {
+        let top = 560.0;
+        v.rect(SKIN_COL_X, top, CLASSIC_W - 2.0 * SKIN_COL_X, 84.0, hex(0x141824));
+        v.outline(SKIN_COL_X, top, CLASSIC_W - 2.0 * SKIN_COL_X, 84.0, 2.0, hex(0x262c3d));
+        v.text(item.name(), SKIN_COL_X + 18.0, top + 36.0, 30.0, WHITE);
+        let name_w = measure_text(item.name(), None, (30.0 * v.scale).max(1.0) as u16, 1.0).width / v.scale;
+        v.text(item.kind(), SKIN_COL_X + 30.0 + name_w, top + 36.0, 20.0, hex(0x5d6680));
+        let (status, color) = if item.equipped_in(equipped) {
+            ("EQUIPPED".to_owned(), hex(0x5cdb5c))
+        } else if progress.unlocked(item) {
+            ("Enter or click to equip".to_owned(), hex(0xffd23f))
+        } else {
+            (format!("LOCKED  ·  {} to unlock", progress::unlock_hint(item)), hex(0xff9a3c))
+        };
+        v.text_mixed(&status, SKIN_COL_X + 18.0, top + 66.0, 20.0, color);
+    }
+
+    let back = skin_back_rect();
+    let hb = hover == Some(SkinsHit::Back);
+    v.rect(back.x, back.y, back.w, back.h, if hb { hex(0x1c2234) } else { hex(0x10131c) });
+    v.outline(back.x, back.y, back.w, back.h, 2.0, if hb { hex(0x9aa3b8) } else { hex(0x262c3d) });
+    v.text_centered("BACK", back.x + back.w / 2.0, back.y + back.h / 2.0 + 7.0, 20.0, if hb { WHITE } else { hex(0x9aa3b8) });
+    v.text_centered("Arrows or mouse to browse  ·  Enter or click to equip  ·  Esc back", cx, 724.0, 18.0, hex(0x5d6680));
+}
+
+/// A small padlock.
+fn draw_lock(v: &View, cx: f32, cy: f32) {
+    let c = hex(0x9aa3b8);
+    v.circle_lines(cx, cy - 2.0, 4.0, 1.5, c);
+    v.rect(cx - 5.5, cy - 1.0, 11.0, 8.0, c);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skins_screen_targets_never_overlap_and_fit() {
+        let mut rects = vec![skin_back_rect()];
+        for col in 0..SKIN_COLUMNS.len() {
+            for row in 0..skin_column(col).len() {
+                rects.push(skin_item_rect(col, row));
+            }
+        }
+        for (i, a) in rects.iter().enumerate() {
+            assert!(a.x >= 0.0 && a.right() <= SKIN_PREVIEW_X - 10.0 && a.bottom() < 700.0, "{a:?}");
+            // Lists stay clear of the info box.
+            assert!(a.bottom() < 560.0 || *a == skin_back_rect(), "{a:?}");
+            for b in &rects[i + 1..] {
+                assert!(!a.overlaps(b), "{a:?} overlaps {b:?}");
+            }
+        }
+        let preview_right = SKIN_PREVIEW_X + WIDTH as f32 * PREVIEW_CELL + 16.0 + 72.0;
+        assert!(preview_right <= CLASSIC_W, "preview ends at {preview_right}");
+        assert!(SKIN_TOP + PREVIEW_ROWS as f32 * PREVIEW_CELL < 560.0);
+    }
+
+    #[test]
+    fn preview_rows_are_full_width() {
+        for row in PREVIEW_STACK {
+            assert_eq!(row.len(), WIDTH);
+        }
+    }
 
     #[test]
     fn menu_targets_never_overlap_and_fit_the_canvas() {
@@ -1223,7 +1703,8 @@ mod select_tests {
     #[test]
     fn every_shadow_row_fits_above_the_hints() {
         let n = crate::bot::SHADOWS.len();
-        let blurb_y = select_item_rect(n).y + 16.0;
+        // The blurb and the records line under it.
+        let blurb_y = select_item_rect(n).y + 14.0 + 24.0;
         assert!(blurb_y < 700.0, "blurb at {blurb_y}");
         for i in 0..n {
             assert!(!select_item_rect(i).overlaps(&select_item_rect(i + 1)));
