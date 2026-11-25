@@ -64,13 +64,18 @@ pub enum Motion {
     /// Every frame shows the real board: no flight, collapse or glide.
     /// Particles, shake and callouts stay, as they don't misrepresent the field.
     Competitive,
+    /// No animation at all: the real board, and no particles, shake, flashes,
+    /// callouts or moving decorations anywhere. Sound is unaffected.
+    Off,
 }
 
 impl Motion {
+    /// The `M` key and the menu toggle cycle full -> competitive -> off.
     pub fn toggled(self) -> Self {
         match self {
             Motion::Full => Motion::Competitive,
-            Motion::Competitive => Motion::Full,
+            Motion::Competitive => Motion::Off,
+            Motion::Off => Motion::Full,
         }
     }
 
@@ -78,7 +83,18 @@ impl Motion {
         match self {
             Motion::Full => "full",
             Motion::Competitive => "competitive",
+            Motion::Off => "off",
         }
+    }
+
+    /// Every frame shows the real board (no flight, collapse or glide).
+    pub fn true_board(self) -> bool {
+        self != Motion::Full
+    }
+
+    /// Anything moves at all.
+    pub fn animated(self) -> bool {
+        self != Motion::Off
     }
 }
 
@@ -286,7 +302,7 @@ impl Fx {
     /// Switching to competitive immediately settles anything that's off the true board.
     pub fn set_motion(&mut self, motion: Motion) {
         self.motion = motion;
-        if motion == Motion::Competitive {
+        if motion.true_board() {
             self.land();
             self.collapse = None;
             self.burst_due_cells(true);
@@ -296,7 +312,7 @@ impl Fx {
 
     /// Flight time for a drop of `distance` rows, given how fast the player is dropping.
     fn drop_duration(&self, distance: i32) -> f32 {
-        if self.motion == Motion::Competitive {
+        if self.motion.true_board() {
             return 0.0;
         }
         let by_distance = (DROP_BASE_TIME + distance as f32 * DROP_TIME_PER_ROW).min(DROP_MAX_TIME);
@@ -514,7 +530,7 @@ impl Fx {
                     })
                 }
                 // Rows are already where they belong; don't draw old cells over them.
-                Motion::Competitive => self.burst_due_cells(true),
+                Motion::Competitive | Motion::Off => self.burst_due_cells(true),
             }
         }
     }
@@ -585,7 +601,7 @@ impl Fx {
     /// so tucks and spins always show the true position.
     pub fn follow_active(&mut self, logical_y: i32, grounded: bool, dt: f32) {
         let target = logical_y as f32;
-        let snap = self.snap_active || grounded || self.motion == Motion::Competitive;
+        let snap = self.snap_active || grounded || self.motion.true_board();
         self.snap_active = false;
         match &mut self.active_y {
             Some(y) if !snap => {
@@ -611,10 +627,16 @@ impl Fx {
     }
 
     pub fn shake_offset(&self) -> Vec2 {
+        if !self.motion.animated() {
+            return Vec2::ZERO;
+        }
         self.shake.offset()
     }
 
     pub fn border_color(&self, base: Color) -> Color {
+        if !self.motion.animated() {
+            return base;
+        }
         match self.border {
             Some((flash, remaining)) => mix(base, flash, remaining / BORDER_FLASH_TIME),
             None => base,
@@ -634,6 +656,9 @@ impl Fx {
 
     /// Effects that sit on the field, under the active piece.
     pub fn draw_field(&self, v: &View) {
+        if !self.motion.animated() {
+            return;
+        }
         // Landed trails fade out where the piece came from.
         for trail in &self.trails {
             let fade = 1.0 - trail.t / TRAIL_TIME;
@@ -699,6 +724,9 @@ impl Fx {
 
     /// Effects drawn above everything else on the field.
     pub fn draw_top(&self, v: &View) {
+        if !self.motion.animated() {
+            return;
+        }
         self.particles.draw(v);
         self.callouts.draw(v, BOARD_X + BOARD_W / 2.0, BOARD_Y + 190.0, self.time);
     }
@@ -905,6 +933,23 @@ mod tests {
         let mut fx = Fx::default();
         fx.handle(&hard_drop(0));
         assert_eq!(kinds(&fx.take_presented()), ["drop"]);
+    }
+
+    #[test]
+    fn motion_cycles_full_competitive_off() {
+        assert_eq!(Motion::Full.toggled(), Motion::Competitive);
+        assert_eq!(Motion::Competitive.toggled(), Motion::Off);
+        assert_eq!(Motion::Off.toggled(), Motion::Full);
+        assert!(Motion::Off.true_board() && !Motion::Off.animated());
+    }
+
+    #[test]
+    fn motion_off_draws_no_shake_or_flash() {
+        let mut fx = Fx::new(Motion::Off);
+        fx.shake.add(1.0);
+        fx.border = Some((WHITE, BORDER_FLASH_TIME));
+        assert_eq!(fx.shake_offset(), Vec2::ZERO);
+        assert_eq!(fx.border_color(BLACK), BLACK);
     }
 
     #[test]

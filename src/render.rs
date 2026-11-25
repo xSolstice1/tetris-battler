@@ -169,6 +169,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     let width = if battle.is_some() || versus.is_some() { BATTLE_W } else { CLASSIC_W };
     let v = View::fit_window(fx.shake_offset(), width);
     let field_bg = hex(0x10131c);
+    // Motion off: nothing on screen moves on its own.
+    let still = !fx.motion().animated();
 
     // Field frame (flashes with the last clear's colour) and background.
     v.rect(
@@ -209,7 +211,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         let rows = pending.min(VISIBLE_ROWS as u32) as f32;
         let h = rows * CELL;
         let danger = pending >= 4;
-        let pulse = if danger { 0.75 + 0.25 * (get_time() as f32 * 12.0).sin() } else { 1.0 };
+        let pulse = if danger && !still { 0.75 + 0.25 * (get_time() as f32 * 12.0).sin() } else { 1.0 };
         v.rect(BOARD_X - 14.0, BOARD_Y + BOARD_H - h, 8.0, h, with_alpha(hex(0xff4f6d), pulse));
     }
 
@@ -284,7 +286,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     panel(&v, "NEXT", RIGHT_X, BOARD_Y, PANEL_W, queue_h);
     if battle.is_some_and(Battle::next_hidden) {
         // Fog ability: the queue is hidden behind drifting murk.
-        let t = get_time() as f32;
+        let t = if still { 0.0 } else { get_time() as f32 };
         for i in 0..6 {
             let y = BOARD_Y + 8.0 + i as f32 * (queue_h - 16.0) / 6.0;
             let drift = (t * 1.5 + i as f32).sin() * 10.0;
@@ -304,7 +306,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     }
 
     if let Some(b) = battle {
-        draw_battle_panel(&v, b);
+        draw_battle_panel(&v, b, still);
         if let Phase::Intermission { .. } = b.phase {
             let next = battle::monster(b.monster.tier + 1);
             v.rect(BOARD_X, BOARD_Y + 250.0, BOARD_W, 120.0, Color::new(0.0, 0.0, 0.0, 0.6));
@@ -329,8 +331,9 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     if let Some(vs) = versus {
         match vs.phase {
             VsPhase::Over { player_won } => draw_versus_results(&v, vs, player_won, &game.stats),
-            VsPhase::Countdown { left } => draw_countdown(&v, vs, left),
+            VsPhase::Countdown { left } => draw_countdown(&v, vs, left, still),
             VsPhase::Fighting if paused => draw_pause(&v),
+            VsPhase::Fighting if still => {}
             VsPhase::Fighting => draw_go(&v, vs),
         }
         return;
@@ -426,9 +429,9 @@ fn draw_aura(v: &View, b: &Battle, cx: f32, mid_y: f32, t: f32) {
 }
 
 /// Draws the monster standing with its feet at `feet_y`.
-fn draw_monster(v: &View, b: &Battle, cx: f32, feet_y: f32) {
+fn draw_monster(v: &View, b: &Battle, cx: f32, feet_y: f32, still: bool) {
     use monster_art::{H, W};
-    let t = get_time() as f32;
+    let t = if still { 0.0 } else { get_time() as f32 };
     let m = &b.monster;
     let body = hex(m.color);
     let accent = hex(m.art.accent);
@@ -440,21 +443,26 @@ fn draw_monster(v: &View, b: &Battle, cx: f32, feet_y: f32) {
         Phase::Intermission { left } => Some(1.0 - left / battle::INTERMISSION),
         _ => None,
     };
-    let recent_hit = b.hits.last().map_or(f32::MAX, |&(_, age)| age);
+    // Motion off: no hit flash or knockback, no breathing, lunging, trembling or blinking,
+    // and a defeated monster simply disappears instead of shattering.
+    if still && dying.is_some() {
+        return;
+    }
+    let recent_hit = if still { f32::MAX } else { b.hits.last().map_or(f32::MAX, |&(_, age)| age) };
     let flash = (1.0 - recent_hit / 0.12).max(0.0);
     let knock = (1.0 - recent_hit / 0.25).max(0.0);
     // Winding up for a garbage attack: tint red and tremble.
     let warn = if fighting && b.attack_timer < ATTACK_WARN { 1.0 - b.attack_timer / ATTACK_WARN } else { 0.0 };
-    let warn_pulse = 0.6 + 0.4 * (t * 18.0).sin();
+    let warn_pulse = if still { 0.8 } else { 0.6 + 0.4 * (t * 18.0).sin() };
     // Just attacked (or just arrived): a quick lunge.
     let since_attack = m.attack_every - b.attack_timer;
-    let lunge = if fighting { (1.0 - since_attack / 0.25).max(0.0) } else { 0.0 };
+    let lunge = if fighting && !still { (1.0 - since_attack / 0.25).max(0.0) } else { 0.0 };
 
-    let breathe = (t * 3.0).sin();
+    let breathe = if still { 0.0 } else { (t * 3.0).sin() };
     let sx = 1.0 - 0.03 * breathe + 0.12 * lunge;
     let sy = 1.0 + 0.035 * breathe + 0.08 * lunge;
     let x0 = cx + warn * (t * 55.0).sin() * 3.0 + knock * knock * 12.0;
-    let blink = (t % 3.7) < 0.12 || recent_hit < 0.2;
+    let blink = !still && ((t % 3.7) < 0.12 || recent_hit < 0.2);
 
     if dying.is_none() {
         draw_aura(v, b, cx, feet_y - sprite_h / 2.0, t);
@@ -487,9 +495,9 @@ fn draw_monster(v: &View, b: &Battle, cx: f32, feet_y: f32) {
         }
     }
 
-    // Damage numbers float up from the monster.
+    // Damage numbers float up from the monster (motion off: they hold still, then vanish).
     for &(damage, age) in &b.hits {
-        let k = age / battle::HIT_POPUP_TIME;
+        let k = if still { 0.0 } else { age / battle::HIT_POPUP_TIME };
         let alpha = 1.0 - k * k;
         let size = 30.0 + damage.min(20) as f32;
         let y = feet_y - sprite_h - 10.0 - k * 60.0;
@@ -502,7 +510,7 @@ fn mix_colors(a: Color, b: Color, t: f32) -> Color {
     Color::new(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a)
 }
 
-fn draw_battle_panel(v: &View, b: &Battle) {
+fn draw_battle_panel(v: &View, b: &Battle, still: bool) {
     let (x, w) = (PANEL_X, MONSTER_PANEL_W);
     let cx = x + w / 2.0;
     let m = &b.monster;
@@ -521,10 +529,10 @@ fn draw_battle_panel(v: &View, b: &Battle) {
     v.rect(x + 20.0, feet_y + 8.0, w - 40.0, 2.0, with_alpha(hex(m.color), 0.15));
     v.outline(x, BOARD_Y, w, 300.0, 2.0, hex(0x262c3d));
     v.text_centered(&m.title(), cx, BOARD_Y + 40.0, 34.0, hex(m.color));
-    draw_monster(v, b, cx, feet_y);
+    draw_monster(v, b, cx, feet_y, still);
     if let Some(ability) = m.ability {
         let active = b.ability_in_effect();
-        let pulse = 0.6 + 0.4 * (get_time() as f32 * 8.0).sin().abs();
+        let pulse = if still { 1.0 } else { 0.6 + 0.4 * (get_time() as f32 * 8.0).sin().abs() };
         let color = if active { with_alpha(hex(0xff4f6d), pulse) } else { hex(0x7fd8ff) };
         let label = if active { format!("{}!", ability.name()) } else { ability.name().to_owned() };
         v.text_centered(&label, cx, BOARD_Y + 262.0, 24.0, color);
@@ -546,7 +554,7 @@ fn draw_battle_panel(v: &View, b: &Battle) {
     let time_y = hp_y + 80.0;
     let secs = b.time_left.ceil() as u32;
     let urgent = b.time_left < 10.0 && b.phase == Phase::Fighting;
-    let pulse = if urgent { 0.6 + 0.4 * (get_time() as f32 * 10.0).sin().abs() } else { 1.0 };
+    let pulse = if urgent && !still { 0.6 + 0.4 * (get_time() as f32 * 10.0).sin().abs() } else { 1.0 };
     let time_color = if urgent { with_alpha(hex(0xff4f6d), pulse) } else { WHITE };
     v.text("TIME", x, time_y, 22.0, muted);
     v.text(&format!("{}:{:02}", secs / 60, secs % 60), x + 70.0, time_y + 4.0, 44.0, time_color);
@@ -750,11 +758,12 @@ fn draw_versus_panel(v: &View, vs: &Versus) {
 }
 
 /// "3, 2, 1" over both fields, each number popping in.
-fn draw_countdown(v: &View, vs: &Versus, left: f32) {
+fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     let cx = BOARD_X + BOARD_W / 2.0;
     v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.45));
     let n = left.ceil().max(1.0) as u32;
-    let k = left.fract();
+    // Motion off: the number just changes, without the pop.
+    let k = if still { 0.6 } else { left.fract() };
     let size = 90.0 + 50.0 * k * k;
     v.text_centered(&n.to_string(), cx, BOARD_Y + BOARD_H / 2.0 + size * 0.3, size, with_alpha(WHITE, 0.4 + 0.6 * k));
     v.text_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 110.0, 28.0, hex(vs.profile.color));
