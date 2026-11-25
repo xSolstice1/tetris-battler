@@ -241,6 +241,9 @@ pub struct Audio {
     /// Energy from presented events since the last music update (events are
     /// handled through `&self`).
     energy: Cell<f32>,
+    /// From the settings: master x effects, master x music.
+    sfx_gain: f32,
+    music_gain: f32,
 }
 
 impl Audio {
@@ -267,6 +270,8 @@ impl Audio {
             music: player::Player::new().await,
             music_on: true,
             energy: Cell::new(0.0),
+            sfx_gain: 1.0,
+            music_gain: 0.7,
         }
     }
 
@@ -276,6 +281,12 @@ impl Audio {
 
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
+    }
+
+    /// Volumes from the settings (master x effects, master x music), 0..1.
+    pub fn set_gains(&mut self, sfx: f32, music: f32) {
+        self.sfx_gain = sfx.clamp(0.0, 1.0);
+        self.music_gain = music.clamp(0.0, 1.0);
     }
 
     pub fn music_on(&self) -> bool {
@@ -289,7 +300,7 @@ impl Audio {
     /// Call once a frame with what the music should be doing.
     pub fn update_music(&mut self, dt: f32, mood: &Mood) {
         self.music.bump(self.energy.take());
-        let volume = if self.muted || !self.music_on { 0.0 } else { player::MUSIC_VOLUME };
+        let volume = if self.muted || !self.music_on { 0.0 } else { player::MUSIC_VOLUME * self.music_gain };
         self.music.update(dt, mood, volume);
     }
 
@@ -308,7 +319,7 @@ impl Audio {
                 pick(bank),
                 PlaySoundParams {
                     looped: false,
-                    volume: volume * MASTER_VOLUME,
+                    volume: volume * MASTER_VOLUME * self.sfx_gain,
                 },
             );
         }

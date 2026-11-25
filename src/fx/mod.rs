@@ -72,15 +72,6 @@ pub enum Motion {
 }
 
 impl Motion {
-    /// The `M` key and the menu toggle cycle full -> competitive -> off.
-    pub fn toggled(self) -> Self {
-        match self {
-            Motion::Full => Motion::Competitive,
-            Motion::Competitive => Motion::Off,
-            Motion::Off => Motion::Full,
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Motion::Full => "full",
@@ -88,15 +79,50 @@ impl Motion {
             Motion::Off => "off",
         }
     }
+}
 
-    /// Every frame shows the real board (no flight, collapse or glide).
-    pub fn true_board(self) -> bool {
-        self != Motion::Full
+/// The field's effects, each on its own (the settings screen's Video tab). `Motion` names
+/// the presets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Effects {
+    /// A hard-dropped piece is drawn travelling down (the board shows its old state meanwhile).
+    pub flight: bool,
+    /// Rows slide down after a clear.
+    pub collapse: bool,
+    /// The falling piece eases between rows.
+    pub glide: bool,
+    /// The screen jolts on big hits.
+    pub shake: bool,
+    /// Clear bursts, lock flashes, trails, the border flash, callouts, the top-out crumble.
+    pub clears: bool,
+}
+
+impl Effects {
+    /// The real board, still, with clear effects: the default.
+    pub const COMPETITIVE: Effects = Effects { flight: false, collapse: false, glide: false, shake: false, clears: true };
+    pub const FULL: Effects = Effects { flight: true, collapse: true, glide: true, shake: true, clears: true };
+    pub const OFF: Effects = Effects { flight: false, collapse: false, glide: false, shake: false, clears: false };
+
+    /// Which preset these are, if any.
+    pub fn preset(self) -> Option<Motion> {
+        [(Effects::COMPETITIVE, Motion::Competitive), (Effects::FULL, Motion::Full), (Effects::OFF, Motion::Off)]
+            .into_iter()
+            .find(|(e, _)| *e == self)
+            .map(|(_, m)| m)
     }
 
-    /// Anything moves at all.
-    pub fn animated(self) -> bool {
-        self != Motion::Off
+    pub fn label(self) -> &'static str {
+        self.preset().map_or("custom", Motion::label)
+    }
+}
+
+impl From<Motion> for Effects {
+    fn from(m: Motion) -> Effects {
+        match m {
+            Motion::Full => Effects::FULL,
+            Motion::Competitive => Effects::COMPETITIVE,
+            Motion::Off => Effects::OFF,
+        }
     }
 }
 
@@ -210,7 +236,7 @@ pub struct Fx {
     /// Effects clock when the last hard drop happened, and the running average gap.
     last_drop_at: Option<f32>,
     drop_interval: f32,
-    motion: Motion,
+    effects: Effects,
     presented: Vec<Event>,
     time: f32,
     /// Seconds since the player topped out (the stack crumbles), if they have.
@@ -280,7 +306,8 @@ impl Default for Fx {
 }
 
 impl Fx {
-    pub fn new(motion: Motion) -> Self {
+    pub fn new(effects: impl Into<Effects>) -> Self {
+        let effects = effects.into();
         Fx {
             particles: Particles::default(),
             shake: Shake::default(),
@@ -296,31 +323,35 @@ impl Fx {
             last_drop_at: None,
             // Assume a relaxed pace until we've seen some drops.
             drop_interval: DROP_INTERVAL_CAP,
-            motion,
+            effects,
             presented: Vec::new(),
             time: 0.0,
             death: None,
         }
     }
 
-    pub fn motion(&self) -> Motion {
-        self.motion
+    pub fn effects(&self) -> Effects {
+        self.effects
     }
 
-    /// Switching to competitive immediately settles anything that's off the true board.
-    pub fn set_motion(&mut self, motion: Motion) {
-        self.motion = motion;
-        if motion.true_board() {
+    /// Changing effects settles anything that's now off the true board.
+    pub fn set_effects(&mut self, effects: impl Into<Effects>) {
+        self.effects = effects.into();
+        if !self.effects.flight {
             self.land();
+        }
+        if !self.effects.collapse {
             self.collapse = None;
             self.burst_due_cells(true);
+        }
+        if !self.effects.glide {
             self.snap_active = true;
         }
     }
 
     /// Flight time for a drop of `distance` rows, given how fast the player is dropping.
     fn drop_duration(&self, distance: i32) -> f32 {
-        if self.motion.true_board() {
+        if !self.effects.flight {
             return 0.0;
         }
         let by_distance = (DROP_BASE_TIME + distance as f32 * DROP_TIME_PER_ROW).min(DROP_MAX_TIME);
@@ -533,15 +564,14 @@ impl Fx {
                 big: lines >= 4 || c.t_spin,
                 t: 0.0,
             });
-            match self.motion {
-                Motion::Full => {
-                    self.collapse = Some(Collapse {
-                        shift: collapse_shifts(&c.rows),
-                        t: 0.0,
-                    })
-                }
+            if self.effects.collapse {
+                self.collapse = Some(Collapse {
+                    shift: collapse_shifts(&c.rows),
+                    t: 0.0,
+                });
+            } else {
                 // Rows are already where they belong; don't draw old cells over them.
-                Motion::Competitive | Motion::Off => self.burst_due_cells(true),
+                self.burst_due_cells(true);
             }
         }
     }
@@ -615,7 +645,7 @@ impl Fx {
     /// so tucks and spins always show the true position.
     pub fn follow_active(&mut self, logical_y: i32, grounded: bool, dt: f32) {
         let target = logical_y as f32;
-        let snap = self.snap_active || grounded || self.motion.true_board();
+        let snap = self.snap_active || grounded || !self.effects.glide;
         self.snap_active = false;
         match &mut self.active_y {
             Some(y) if !snap => {
@@ -642,7 +672,7 @@ impl Fx {
 
     /// Progress of the top-out crumble (0 -> 1), while it plays.
     pub fn death_progress(&self) -> Option<f32> {
-        if !self.motion.animated() {
+        if !self.effects.clears {
             return None;
         }
         self.death.map(|t| (t / DEATH_TIME).min(1.0)).filter(|&k| k < 1.0)
@@ -654,15 +684,15 @@ impl Fx {
     }
 
     pub fn shake_offset(&self) -> Vec2 {
-        // Only full motion shakes the screen: it moves the board under a competitive player.
-        if self.motion != Motion::Full {
+        // It moves the board under the player: only when asked for.
+        if !self.effects.shake {
             return Vec2::ZERO;
         }
         self.shake.offset()
     }
 
     pub fn border_color(&self, base: Color) -> Color {
-        if !self.motion.animated() {
+        if !self.effects.clears {
             return base;
         }
         match self.border {
@@ -684,11 +714,11 @@ impl Fx {
 
     /// Effects that sit on the field, under the active piece.
     pub fn draw_field(&self, v: &View) {
-        if !self.motion.animated() {
-            return;
-        }
+        // A piece in flight is the board itself (shown in place of the lock): always drawn.
+        // Its streaks, and everything else here, are clear effects.
+        let fx_on = self.effects.clears;
         // Landed trails fade out where the piece came from.
-        for trail in &self.trails {
+        for trail in self.trails.iter().filter(|_| fx_on) {
             let fade = 1.0 - trail.t / TRAIL_TIME;
             for &(x, top, landing) in &trail.columns {
                 let (_, y0) = render::cell_pos(x, top);
@@ -700,11 +730,11 @@ impl Fx {
         // In-flight hard drop: streak grows behind the falling piece, with blur copies.
         if let Some(drop) = &self.drop {
             let fallen = drop.rows_fallen_at(drop.t) * CELL;
-            for &(x, top, _) in &trail_columns(&drop.piece, drop.distance) {
+            for &(x, top, _) in trail_columns(&drop.piece, drop.distance).iter().filter(|_| fx_on) {
                 let (_, y0) = render::cell_pos(x, top);
                 draw_streak(v, x, y0, y0 + fallen, drop.color, 1.0);
             }
-            for (k, alpha) in [(3.0, 0.12), (2.0, 0.2), (1.0, 0.32)] {
+            for (k, alpha) in [(3.0, 0.12), (2.0, 0.2), (1.0, 0.32)].into_iter().filter(|_| fx_on) {
                 let lag = drop.rows_fallen_at(drop.t - k * DROP_BLUR_STEP * drop.duration) * CELL;
                 for (x, y) in drop.piece.cells() {
                     let (px, py) = render::cell_pos(x, y);
@@ -717,6 +747,9 @@ impl Fx {
             }
         }
 
+        if !fx_on {
+            return;
+        }
         for anim in &self.clears {
             let beam_t = anim.t / BEAM_TIME;
             let beam_alpha = (1.0 - beam_t).max(0.0) * if anim.big { 0.55 } else { 0.35 };
@@ -752,7 +785,7 @@ impl Fx {
 
     /// Effects drawn above everything else on the field.
     pub fn draw_top(&self, v: &View) {
-        if !self.motion.animated() {
+        if !self.effects.clears {
             return;
         }
         self.particles.draw(v);
@@ -964,11 +997,12 @@ mod tests {
     }
 
     #[test]
-    fn motion_cycles_full_competitive_off() {
-        assert_eq!(Motion::Full.toggled(), Motion::Competitive);
-        assert_eq!(Motion::Competitive.toggled(), Motion::Off);
-        assert_eq!(Motion::Off.toggled(), Motion::Full);
-        assert!(Motion::Off.true_board() && !Motion::Off.animated());
+    fn presets_map_to_effects_and_back() {
+        for m in [Motion::Full, Motion::Competitive, Motion::Off] {
+            assert_eq!(Effects::from(m).preset(), Some(m));
+        }
+        let custom = Effects { flight: true, ..Effects::COMPETITIVE };
+        assert_eq!(custom.label(), "custom");
     }
 
     #[test]
@@ -1010,7 +1044,7 @@ mod tests {
         fx.handle(&single_clear());
         fx.handle(&hard_drop(18));
         assert!(fx.frozen_board().is_some());
-        fx.set_motion(Motion::Competitive);
+        fx.set_effects(Motion::Competitive);
         assert_eq!(fx.frozen_board(), None);
         assert_eq!(fx.row_offset(10), 0.0);
     }

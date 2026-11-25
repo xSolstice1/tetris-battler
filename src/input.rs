@@ -1,17 +1,11 @@
-//! Keyboard -> game actions, with DAS/ARR auto-repeat for sideways movement
-//! and a fixed repeat rate for soft drop.
+//! Keyboard -> game actions, with DAS/ARR auto-repeat for sideways movement and a
+//! repeat rate for soft drop, all from the player's settings (bound keys included).
 
 use macroquad::prelude::*;
 
 use crate::game::Action;
+use crate::settings::{Bind, Keys, Settings};
 
-/// Delay before a held left/right starts repeating.
-const DAS: f32 = 0.133;
-/// Interval between repeats once DAS has charged.
-const ARR: f32 = 0.033;
-const SOFT_DROP_INTERVAL: f32 = 0.033;
-
-#[derive(Default)]
 pub struct Input {
     dir: i32,
     das_timer: f32,
@@ -19,19 +13,64 @@ pub struct Input {
     soft_timer: f32,
     /// Real presses of game keys so far (auto-repeat excluded), for KPP.
     presses: u32,
+    /// Delay before a held left/right repeats, and the repeat interval (0 = to the wall).
+    das: f32,
+    arr: f32,
+    /// Seconds per soft-drop row (0 = to the floor).
+    soft: f32,
+    keys: Keys,
 }
 
-fn pressed(keys: &[KeyCode]) -> bool {
-    keys.iter().any(|&k| is_key_pressed(k))
+impl Default for Input {
+    fn default() -> Self {
+        Input::new(&Settings::default())
+    }
 }
+
+/// The furthest a single frame of instant repeat can move (the field's width is plenty).
+const INSTANT: usize = 20;
 
 impl Input {
-    /// Clears held-key state (e.g. on pause) but keeps the press count.
+    pub fn new(s: &Settings) -> Self {
+        Input {
+            dir: 0,
+            das_timer: 0.0,
+            arr_timer: 0.0,
+            soft_timer: 0.0,
+            presses: 0,
+            das: s.das_ms as f32 / 1000.0,
+            arr: s.arr_ms as f32 / 1000.0,
+            soft: s.soft_ms as f32 / 1000.0,
+            keys: s.keys.clone(),
+        }
+    }
+
+    /// Takes new handling and keys (from the settings screen), keeping the press count.
+    pub fn apply(&mut self, s: &Settings) {
+        let presses = self.presses;
+        *self = Input::new(s);
+        self.presses = presses;
+    }
+
+    fn pressed(&self, b: Bind) -> bool {
+        self.keys.keys(b).any(is_key_pressed)
+    }
+
+    fn down(&self, b: Bind) -> bool {
+        self.keys.keys(b).any(is_key_down)
+    }
+
+    /// Held from before this frame (not just pressed): initial rotation / hold.
+    pub fn held(&self, b: Bind) -> bool {
+        self.keys.keys(b).any(|k| is_key_down(k) && !is_key_pressed(k))
+    }
+
+    /// Clears held-key state (e.g. on pause) but keeps the press count and settings.
     pub fn reset(&mut self) {
-        *self = Self {
-            presses: self.presses,
-            ..Self::default()
-        };
+        self.dir = 0;
+        self.das_timer = 0.0;
+        self.arr_timer = 0.0;
+        self.soft_timer = 0.0;
     }
 
     pub fn presses(&self) -> u32 {
@@ -46,40 +85,26 @@ impl Input {
 
     pub fn poll(&mut self, dt: f32) -> Vec<Action> {
         let mut out = Vec::new();
-        const GAME_KEYS: [KeyCode; 12] = [
-            KeyCode::Left,
-            KeyCode::Right,
-            KeyCode::Down,
-            KeyCode::Up,
-            KeyCode::Space,
-            KeyCode::X,
-            KeyCode::Z,
-            KeyCode::C,
-            KeyCode::LeftShift,
-            KeyCode::RightShift,
-            KeyCode::LeftControl,
-            KeyCode::RightControl,
-        ];
-        self.presses += GAME_KEYS.iter().filter(|&&k| is_key_pressed(k)).count() as u32;
+        self.presses += Bind::ALL.iter().flat_map(|&b| self.keys.keys(b)).filter(|&k| is_key_pressed(k)).count() as u32;
 
-        if pressed(&[KeyCode::C, KeyCode::LeftShift, KeyCode::RightShift]) {
+        if self.pressed(Bind::Hold) {
             out.push(Action::Hold);
         }
-        if pressed(&[KeyCode::Up, KeyCode::X]) {
+        if self.pressed(Bind::RotateCw) {
             out.push(Action::RotateCw);
         }
-        if pressed(&[KeyCode::Z, KeyCode::LeftControl, KeyCode::RightControl]) {
+        if self.pressed(Bind::RotateCcw) {
             out.push(Action::RotateCcw);
         }
 
         // Sideways: the most recently pressed direction wins.
-        let left = is_key_down(KeyCode::Left);
-        let right = is_key_down(KeyCode::Right);
-        if is_key_pressed(KeyCode::Left) {
+        let left = self.down(Bind::Left);
+        let right = self.down(Bind::Right);
+        if self.pressed(Bind::Left) {
             self.start_shift(-1);
             out.push(Action::MoveLeft);
         }
-        if is_key_pressed(KeyCode::Right) {
+        if self.pressed(Bind::Right) {
             self.start_shift(1);
             out.push(Action::MoveRight);
         }
@@ -99,31 +124,39 @@ impl Input {
         }
         if self.dir != 0 {
             self.das_timer += dt;
-            if self.das_timer >= DAS {
-                self.arr_timer += dt;
-                while self.arr_timer >= ARR {
-                    self.arr_timer -= ARR;
-                    out.push(if self.dir < 0 {
-                        Action::MoveLeft
-                    } else {
-                        Action::MoveRight
-                    });
+            if self.das_timer >= self.das {
+                let step = if self.dir < 0 { Action::MoveLeft } else { Action::MoveRight };
+                if self.arr <= 0.0 {
+                    out.extend(std::iter::repeat_n(step, INSTANT));
+                } else {
+                    self.arr_timer += dt;
+                    while self.arr_timer >= self.arr {
+                        self.arr_timer -= self.arr;
+                        out.push(step);
+                    }
                 }
             }
         }
 
-        if is_key_pressed(KeyCode::Down) {
+        if self.pressed(Bind::SoftDrop) {
             self.soft_timer = 0.0;
             out.push(Action::SoftDrop);
-        } else if is_key_down(KeyCode::Down) {
-            self.soft_timer += dt;
-            while self.soft_timer >= SOFT_DROP_INTERVAL {
-                self.soft_timer -= SOFT_DROP_INTERVAL;
-                out.push(Action::SoftDrop);
+            if self.soft <= 0.0 {
+                out.extend(std::iter::repeat_n(Action::SoftDrop, 40));
+            }
+        } else if self.down(Bind::SoftDrop) {
+            if self.soft <= 0.0 {
+                out.extend(std::iter::repeat_n(Action::SoftDrop, 40));
+            } else {
+                self.soft_timer += dt;
+                while self.soft_timer >= self.soft {
+                    self.soft_timer -= self.soft;
+                    out.push(Action::SoftDrop);
+                }
             }
         }
 
-        if is_key_pressed(KeyCode::Space) {
+        if self.pressed(Bind::HardDrop) {
             out.push(Action::HardDrop);
         }
 

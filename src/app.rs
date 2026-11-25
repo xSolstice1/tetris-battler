@@ -9,7 +9,9 @@ use crate::audio::{Audio, Mood, Track};
 use crate::battle::{Battle, BattleEvent};
 use crate::bot::SHADOWS;
 use crate::versus::{Versus, VsEvent};
-use crate::fx::{Fx, Motion};
+use crate::fx::{Effects, Fx};
+use crate::settings::{Bind, Settings};
+use crate::settings_ui::{self, Extra, Kind};
 use crate::game::Game;
 use crate::input::Input;
 use crate::progress::{Progress, Reward, Run, RunKind};
@@ -49,6 +51,8 @@ impl Mode {
 enum Entry {
     Play(Mode),
     Skins,
+    /// The settings screen (the button beside SOUND, not a list item).
+    Settings,
 }
 
 const MENU: [Entry; 4] = [Entry::Play(Mode::Classic), Entry::Play(Mode::Battler), Entry::Play(Mode::Shadow), Entry::Skins];
@@ -57,6 +61,10 @@ impl Entry {
     fn menu_item(self) -> MenuItem {
         match self {
             Entry::Play(mode) => mode.menu_item(),
+            Entry::Settings => MenuItem {
+                title: "SETTINGS",
+                blurb: "Handling, effects, audio and keys.",
+            },
             Entry::Skins => MenuItem {
                 title: "SKINS",
                 blurb: "Block styles, boards and colours. Level up and beat shadows to unlock more.",
@@ -93,7 +101,7 @@ struct Session {
 }
 
 impl Session {
-    fn new(mode: Mode, motion: Motion, scene_fx: bool, shadow: usize) -> Self {
+    fn new(mode: Mode, opts: &Settings, shadow: usize) -> Self {
         let seed = new_seed();
         let mut game = Game::new(seed);
         let battle = (mode == Mode::Battler).then(|| Battle::new(&mut game));
@@ -106,14 +114,14 @@ impl Session {
         Session {
             mode,
             game,
-            fx: Fx::new(motion),
-            input: Input::default(),
+            fx: Fx::new(opts.effects),
+            input: Input::new(opts),
             paused: false,
             battle,
             versus,
             shadow,
             beat: 0.0,
-            scene: Scene::new(scene_fx, theme),
+            scene: Scene::new(opts.scene, theme),
             reward: None,
         }
     }
@@ -139,7 +147,14 @@ impl Session {
         !self.over() && self.versus.as_ref().is_none_or(Versus::fighting)
     }
 
-    fn update(&mut self, dt: f32, audio: &Audio) {
+    /// Takes changed settings (from the settings screen) without restarting the run.
+    fn apply(&mut self, opts: &Settings) {
+        self.input.apply(opts);
+        self.fx.set_effects(opts.effects);
+        self.scene.set_on(opts.scene);
+    }
+
+    fn update(&mut self, dt: f32, audio: &Audio, opts: &Settings) {
         if self.paused {
             return;
         }
@@ -155,16 +170,15 @@ impl Session {
 
         if self.live() {
             // IRS / IHS: keys already held (not just pressed) apply as the next piece spawns.
-            let held = |keys: &[KeyCode]| keys.iter().any(|&k| is_key_down(k) && !is_key_pressed(k));
             self.game.initial = crate::game::Initial {
-                rotate: if held(&[KeyCode::Up, KeyCode::X]) {
+                rotate: if self.input.held(Bind::RotateCw) {
                     Some(true)
-                } else if held(&[KeyCode::Z, KeyCode::LeftControl, KeyCode::RightControl]) {
+                } else if self.input.held(Bind::RotateCcw) {
                     Some(false)
                 } else {
                     None
                 },
-                hold: held(&[KeyCode::C, KeyCode::LeftShift, KeyCode::RightShift]),
+                hold: self.input.held(Bind::Hold),
             };
             for action in self.input.poll(dt) {
                 self.game.apply(action);
@@ -200,8 +214,8 @@ impl Session {
             self.scene.set_theme(Theme::monster(battle.monster.color));
         }
         // Near the top: a heartbeat, quickening as the danger grows.
-        let danger = if self.live() { crate::danger::level(&self.game) } else { 0.0 };
-        if danger > 0.0 {
+        let danger = if self.live() && opts.danger { crate::danger::level(&self.game) } else { 0.0 };
+        if danger > 0.0 && opts.heartbeat {
             self.beat -= dt;
             if self.beat <= 0.0 {
                 audio.heartbeat(danger);
@@ -227,14 +241,25 @@ enum Screen {
     /// Browsing skins: the focused column and row.
     Skins { col: usize, row: usize },
     Play(Box<Session>),
+    /// The settings screen: tab, focused row, focused key slot (controls), the action
+    /// waiting for a key, and where Esc goes back to (a paused run, or the menu).
+    Settings { tab: usize, row: usize, slot: usize, rebinding: Option<(Bind, usize)>, back: Option<Box<Session>> },
+}
+
+/// A settings screen opened from the paused run (filled in once the run is moved over).
+fn settings_screen(back: Option<Box<Session>>) -> Screen {
+    Screen::Settings { tab: 0, row: 0, slot: 0, rebinding: None, back }
 }
 
 pub struct App {
     screen: Screen,
     audio: Audio,
-    motion: Motion,
-    /// Scene effects (everything off the field) animate. On by default.
-    scene_fx: bool,
+    /// Fullscreen right now (not saved: the browser decides on the next visit).
+    fullscreen: bool,
+    /// Settings screen element under the mouse.
+    settings_hover: Option<render::SettingsHit>,
+    /// The run to put into the settings screen opened from pause.
+    pending_back: bool,
     /// Menu element under the mouse this frame.
     hover: Option<MenuHit>,
     /// Skins screen element under the mouse.
@@ -251,8 +276,9 @@ impl App {
         App {
             screen: Screen::Menu { selected: 0 },
             audio: Audio::load().await,
-            motion: Motion::default(),
-            scene_fx: true,
+            fullscreen: false,
+            settings_hover: None,
+            pending_back: false,
             hover: None,
             skins_hover: None,
             last_mouse: Vec2::ZERO,
@@ -275,8 +301,16 @@ impl App {
 
     pub fn frame(&mut self, dt: f32) {
         self.global_keys();
+        let s = &self.progress.settings;
+        self.audio.set_gains(s.sfx_gain(), s.music_gain());
         if let Some(next) = self.update(dt) {
-            self.screen = next;
+            let old = std::mem::replace(&mut self.screen, next);
+            // Opening settings from pause: the paused run comes along, to go back to.
+            if std::mem::take(&mut self.pending_back) {
+                if let (Screen::Settings { back, .. }, Screen::Play(run)) = (&mut self.screen, old) {
+                    *back = Some(run);
+                }
+            }
         }
         let mood = self.mood();
         self.audio.update_music(dt, &mood);
@@ -288,7 +322,7 @@ impl App {
                 _ => None,
             },
             Screen::Select { selected } => Some(Track::shadow(selected, SHADOWS.len())),
-            Screen::Play(_) | Screen::Skins { .. } => None,
+            Screen::Play(_) | Screen::Skins { .. } | Screen::Settings { .. } => None,
         };
         if let Some(track) = next {
             self.audio.prefetch_music(track);
@@ -309,33 +343,49 @@ impl App {
         Mood::play(track, &s.game, s.battle.as_ref(), s.versus.as_ref(), s.paused)
     }
 
+    /// Quick keys: M (competitive <-> everything), E (scene), N (mute), J (music). Not on
+    /// the settings screen, and not if the player has bound that key to a game action.
     fn global_keys(&mut self) {
-        if is_key_pressed(KeyCode::M) {
+        if matches!(self.screen, Screen::Settings { .. }) {
+            return;
+        }
+        let keys = self.progress.settings.keys.clone();
+        let free = |k: KeyCode| is_key_pressed(k) && !keys.bound(k);
+        if free(KeyCode::M) {
             self.toggle_motion();
         }
-        if is_key_pressed(KeyCode::E) {
+        if free(KeyCode::E) {
             self.toggle_scene();
         }
-        if is_key_pressed(KeyCode::N) {
+        if free(KeyCode::N) {
             self.audio.toggle_mute();
         }
-        if is_key_pressed(KeyCode::J) {
+        if free(KeyCode::J) {
             self.audio.toggle_music();
         }
     }
 
-    fn toggle_scene(&mut self) {
-        self.scene_fx = !self.scene_fx;
-        if let Screen::Play(s) = &mut self.screen {
-            s.scene.set_on(self.scene_fx);
+    /// Settings changed: the run in play (or paused behind the settings screen) takes them
+    /// at once, and they're saved.
+    fn settings_changed(&mut self) {
+        let opts = self.progress.settings.clone();
+        match &mut self.screen {
+            Screen::Play(s) => s.apply(&opts),
+            Screen::Settings { back: Some(s), .. } => s.apply(&opts),
+            _ => {}
         }
+        crate::save::store(&self.progress);
+    }
+
+    fn toggle_scene(&mut self) {
+        self.progress.settings.scene = !self.progress.settings.scene;
+        self.settings_changed();
     }
 
     fn toggle_motion(&mut self) {
-        self.motion = self.motion.toggled();
-        if let Screen::Play(s) = &mut self.screen {
-            s.fx.set_motion(self.motion);
-        }
+        let e = &mut self.progress.settings.effects;
+        *e = if *e == Effects::FULL { Effects::COMPETITIVE } else { Effects::FULL };
+        self.settings_changed();
     }
 
     /// Mouse on the menu: hovering an option selects it (only when the mouse
@@ -356,14 +406,7 @@ impl App {
         }
         match self.hover? {
             MenuHit::Item(i) => Some(MENU[i]),
-            MenuHit::Motion => {
-                self.toggle_motion();
-                None
-            }
-            MenuHit::Scene => {
-                self.toggle_scene();
-                None
-            }
+            MenuHit::Settings => Some(Entry::Settings),
             MenuHit::Sound => {
                 self.audio.toggle_mute();
                 None
@@ -397,11 +440,12 @@ impl App {
             }
             Screen::Select { .. } => self.select_update(),
             Screen::Skins { .. } => self.skins_update(),
+            Screen::Settings { .. } => self.settings_update(),
             Screen::Play(session) => {
                 let to_menu = Screen::Menu { selected: menu_index(Entry::Play(session.mode)) };
                 if session.over() {
                     if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
-                        return Some(Screen::Play(Box::new(Session::new(session.mode, self.motion, self.scene_fx, session.shadow))));
+                        return Some(Screen::Play(Box::new(Session::new(session.mode, &self.progress.settings, session.shadow))));
                     }
                     if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
                         // From a 1v1, back to the shadow list.
@@ -416,12 +460,15 @@ impl App {
                         session.input.reset();
                     } else if is_key_pressed(KeyCode::Q) {
                         return Some(to_menu);
+                    } else if is_key_pressed(KeyCode::O) {
+                        self.pending_back = true;
+                        return Some(settings_screen(None));
                     }
                 } else if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::P) {
                     session.paused = true;
                     session.input.reset();
                 }
-                session.update(dt, &self.audio);
+                session.update(dt, &self.audio, &self.progress.settings);
                 self.book_run();
                 None
             }
@@ -431,6 +478,7 @@ impl App {
     fn open(&self, entry: Entry) -> Screen {
         match entry {
             Entry::Play(mode) => self.start(mode, 0),
+            Entry::Settings => settings_screen(None),
             Entry::Skins => {
                 // Start on the equipped block style.
                 let row = render::skin_column(0).iter().position(|i| i.equipped_in(self.progress.skin)).unwrap_or(0);
@@ -490,7 +538,7 @@ impl App {
         if mode == Mode::Shadow {
             Screen::Select { selected: shadow }
         } else {
-            Screen::Play(Box::new(Session::new(mode, self.motion, self.scene_fx, 0)))
+            Screen::Play(Box::new(Session::new(mode, &self.progress.settings, 0)))
         }
     }
 
@@ -517,10 +565,151 @@ impl App {
         }
         if clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
             set_mouse_cursor(CursorIcon::Default);
-            return Some(Screen::Play(Box::new(Session::new(Mode::Shadow, self.motion, self.scene_fx, *selected))));
+            return Some(Screen::Play(Box::new(Session::new(Mode::Shadow, &self.progress.settings, *selected))));
         }
         if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
             return Some(Screen::Menu { selected: menu_index(Entry::Play(Mode::Shadow)) });
+        }
+        None
+    }
+
+    fn extra(&self) -> Extra {
+        Extra { fullscreen: self.fullscreen, muted: self.audio.muted() }
+    }
+
+    /// The settings screen: Up / Down rows, Left / Right adjust (or pick a key slot),
+    /// Enter toggles / rebinds, Tab or [ ] switch tabs, Esc back. Mouse: tabs, rows,
+    /// slider drags, key slots, Back.
+    fn settings_update(&mut self) -> Option<Screen> {
+        let mouse = Vec2::from(mouse_position());
+        let moved = mouse != self.last_mouse;
+        self.last_mouse = mouse;
+        let Screen::Settings { tab, row, rebinding, .. } = &self.screen else {
+            return None;
+        };
+        let (tab_now, row_now) = (*tab, *row);
+        self.settings_hover = render::settings_hit(mouse, tab_now);
+        set_mouse_cursor(if self.settings_hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
+
+        // Waiting for a key to bind.
+        if let Some((bind, slot)) = *rebinding {
+            if let Some(key) = get_last_key_pressed() {
+                let s = &mut self.progress.settings;
+                match key {
+                    KeyCode::Escape => {}
+                    KeyCode::Backspace | KeyCode::Delete => {
+                        // Never leave an action with no key at all.
+                        if s.keys.get(bind)[1 - slot].is_some() {
+                            s.keys.set(bind, slot, None);
+                        }
+                    }
+                    k if crate::settings::BINDABLE.contains(&k) => s.keys.set(bind, slot, Some(k)),
+                    _ => {}
+                }
+                if let Screen::Settings { rebinding, .. } = &mut self.screen {
+                    *rebinding = None;
+                }
+                self.settings_changed();
+            }
+            return None;
+        }
+
+        let rows = settings_ui::rows(tab_now);
+        let mut extra = self.extra();
+        let before = (self.progress.settings.clone(), extra);
+        let mut back = false;
+        let mut new_tab = None;
+        let mut new_row = None;
+        let mut new_slot = None;
+        let mut rebind = None;
+        // Keyboard.
+        if is_key_pressed(KeyCode::Tab) || is_key_pressed(KeyCode::RightBracket) {
+            new_tab = Some((tab_now + if is_key_down(KeyCode::LeftShift) { settings_ui::TABS.len() - 1 } else { 1 }) % settings_ui::TABS.len());
+        }
+        if is_key_pressed(KeyCode::LeftBracket) {
+            new_tab = Some((tab_now + settings_ui::TABS.len() - 1) % settings_ui::TABS.len());
+        }
+        if is_key_pressed(KeyCode::Down) {
+            new_row = Some((row_now + 1) % rows.len());
+        }
+        if is_key_pressed(KeyCode::Up) {
+            new_row = Some((row_now + rows.len() - 1) % rows.len());
+        }
+        let focused = rows[row_now.min(rows.len() - 1)];
+        let dir = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
+        if dir != 0 {
+            match focused.kind() {
+                Kind::Key(_) => new_slot = Some(if dir > 0 { 1 } else { 0 }),
+                _ => focused.adjust(&mut self.progress.settings, &mut extra, dir),
+            }
+        }
+        if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
+            match focused.kind() {
+                Kind::Key(b) => {
+                    let slot = if let Screen::Settings { slot, .. } = &self.screen { *slot } else { 0 };
+                    rebind = Some((b, slot));
+                }
+                _ => focused.activate(&mut self.progress.settings, &mut extra),
+            }
+        }
+        if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+            back = true;
+        }
+        // Mouse.
+        use render::SettingsHit as H;
+        if let (true, Some(H::Row(r) | H::Slider(r, _) | H::KeySlot(r, _))) = (moved, self.settings_hover) {
+            new_row = Some(r);
+        }
+        let clicked = is_mouse_button_pressed(MouseButton::Left);
+        let dragging = is_mouse_button_down(MouseButton::Left);
+        match self.settings_hover {
+            Some(H::Tab(t)) if clicked => new_tab = Some(t),
+            Some(H::Back) if clicked => back = true,
+            Some(H::Slider(r, f)) if dragging => rows[r].set_fraction(&mut self.progress.settings, f),
+            Some(H::KeySlot(r, slot)) if clicked => {
+                if let Kind::Key(b) = rows[r].kind() {
+                    rebind = Some((b, slot));
+                    new_slot = Some(slot);
+                }
+            }
+            Some(H::Row(r)) if clicked => rows[r].activate(&mut self.progress.settings, &mut extra),
+            _ => {}
+        }
+
+        if extra.fullscreen != before.1.fullscreen {
+            self.fullscreen = extra.fullscreen;
+            set_fullscreen(self.fullscreen);
+        }
+        if extra.muted != before.1.muted {
+            self.audio.toggle_mute();
+        }
+        if self.progress.settings != before.0 {
+            self.settings_changed();
+        }
+        if let Screen::Settings { tab, row, slot, rebinding, .. } = &mut self.screen {
+            if let Some(t) = new_tab {
+                *tab = t;
+                *row = 0;
+            }
+            if let Some(r) = new_row {
+                *row = r.min(settings_ui::rows(*tab).len() - 1);
+            }
+            if let Some(s) = new_slot {
+                *slot = s;
+            }
+            if rebind.is_some() {
+                *rebinding = rebind;
+            }
+        }
+        if back {
+            set_mouse_cursor(CursorIcon::Default);
+            let Screen::Settings { back, .. } = std::mem::replace(&mut self.screen, Screen::Menu { selected: 0 }) else {
+                unreachable!()
+            };
+            return Some(match back {
+                Some(run) => Screen::Play(run),
+                None => Screen::Menu { selected: 0 },
+            });
         }
         None
     }
@@ -530,11 +719,14 @@ impl App {
         match &self.screen {
             Screen::Menu { selected } => {
                 let items: Vec<MenuItem> = MENU.iter().map(|e| e.menu_item()).collect();
-                render::draw_menu(&items, *selected, self.hover, sound_on, self.motion, self.scene_fx, &self.progress);
+                render::draw_menu(&items, *selected, self.hover, sound_on, self.progress.settings.scene, &self.progress);
             }
-            Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.scene_fx, &self.progress),
+            Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.progress.settings.scene, &self.progress),
+            Screen::Settings { tab, row, slot, rebinding, back } => {
+                render::draw_settings(&self.progress.settings, self.extra(), *tab, *row, *slot, *rebinding, self.settings_hover, back.is_some())
+            }
             Screen::Skins { col, row } => render::draw_skins(&self.progress, *col, *row, self.skins_hover),
-            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, self.audio.music_on(), s.battle.as_ref(), s.versus.as_ref(), s.reward.as_ref()),
+            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, self.audio.music_on(), &self.progress.settings, s.battle.as_ref(), s.versus.as_ref(), s.reward.as_ref()),
         }
     }
 }

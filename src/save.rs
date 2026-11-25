@@ -33,6 +33,7 @@ pub fn to_text(p: &Progress) -> String {
     let mut out = format!("{HEADER} {VERSION}\n");
     out += &format!("xp={}\nclassic_best={}\nbattle_best={}\n", p.xp, p.classic_best, p.battle_best);
     out += &format!("style={}\ntheme={}\npalette={}\n", p.skin.style.id(), p.skin.theme.id(), p.skin.palette.id());
+    out += &p.settings.to_lines();
     for (key, r) in &p.records {
         out += &format!(
             "shadow.{key}={},{},{},{},{}\n",
@@ -59,6 +60,9 @@ pub fn from_text(text: &str) -> Progress {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
+        if p.settings.read_line(key, value) {
+            continue;
+        }
         match key {
             "xp" => p.xp = value.parse().unwrap_or(p.xp),
             "classic_best" => p.classic_best = value.parse().unwrap_or(p.classic_best),

@@ -86,6 +86,8 @@ pub struct Progress {
     /// Keyed by the shadow's portrait key (stable across renames).
     pub records: BTreeMap<String, ShadowRecord>,
     pub skin: Skin,
+    /// Handling, effects, audio and keys (the settings screen).
+    pub settings: crate::settings::Settings,
 }
 
 /// XP a run is worth, before any first-win bonus.

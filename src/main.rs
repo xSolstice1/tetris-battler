@@ -15,6 +15,8 @@ mod piece;
 mod progress;
 mod render;
 mod scene;
+mod settings;
+mod settings_ui;
 mod save;
 mod skins;
 mod stats;

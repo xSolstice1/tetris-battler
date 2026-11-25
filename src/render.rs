@@ -6,7 +6,9 @@ use macroquad::prelude::*;
 use crate::board::{Cell, HIDDEN_ROWS, TOTAL_ROWS, VISIBLE_ROWS, WIDTH};
 use crate::battle::{self, Ability, Battle, Defeat, Phase};
 use crate::monster_art::{self, Pixel};
-use crate::fx::{Fx, Motion};
+use crate::fx::Fx;
+use crate::settings::{Bind, Settings};
+use crate::settings_ui::{self, Extra, Kind};
 use crate::game::Game;
 use crate::piece::PieceKind;
 use crate::stats::{self, Stats};
@@ -618,7 +620,7 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
 }
 
 /// A play session. `reward` is what the finished run earned (shown on the results).
-pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, music_on: bool, battle: Option<&Battle>, versus: Option<&Versus>, reward: Option<&Reward>) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, music_on: bool, opts: &Settings, battle: Option<&Battle>, versus: Option<&Versus>, reward: Option<&Reward>) {
     let theme = theme();
     clear_background(hex(theme.backdrop));
     let width = if battle.is_some() || versus.is_some() { BATTLE_W } else { CLASSIC_W };
@@ -628,11 +630,11 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
     let scene_still = !scene.on();
     let field_bg = hex(theme.field);
     // Motion off: nothing on screen moves on its own.
-    let still = !fx.motion().animated();
+    let still = !fx.effects().clears;
 
     // Danger: the closer the stack is to the top, the stronger and faster the field pulses
     // red (motion off: a steady tint).
-    let danger = crate::danger::level(game);
+    let danger = if opts.danger { crate::danger::level(game) } else { 0.0 };
     let pulse = if still { 0.6 } else { 0.5 + 0.5 * (get_time() as f32 * (4.0 + 7.0 * danger)).sin() };
     let red = hex(0xff3b4f);
 
@@ -692,7 +694,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
         // The ghost is computed on the real board, so hide it while the last hard
         // drop is still falling over the pre-lock board (it would float or overlap).
         let ghost_y = game.ghost_y();
-        let show_ghost = fx.frozen_board().is_none();
+        let show_ghost = opts.ghost && fx.frozen_board().is_none();
         for (cx, cy) in a.kind.cells(a.rot) {
             if show_ghost && drawable_row(ghost_y + cy) {
                 let (px, py) = cell_pos(a.x + cx, ghost_y + cy);
@@ -712,7 +714,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
     }
 
     // In danger, an outline shows where the next piece will appear (red if it can't).
-    if danger >= 0.5 && !game.game_over {
+    if opts.danger && danger >= 0.5 && !game.game_over {
         let kind = game.next[0];
         let blocked = crate::danger::next_spawn_blocked(game);
         let c = if blocked { red } else { mix_colors(piece_color(kind), red, 0.5) };
@@ -760,7 +762,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
 
     let motion_y = BOARD_Y + 570.0;
     v.text("M  motion:", LEFT_X, motion_y, 18.0, hex(0x5d6680));
-    v.text(fx.motion().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
+    v.text(fx.effects().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
     v.text("E  scene:", LEFT_X, motion_y + 22.0, 18.0, hex(0x5d6680));
     v.text(if scene.on() { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 22.0, 18.0, hex(0x9aa3b8));
     v.text("N  sound:", LEFT_X, motion_y + 44.0, 18.0, hex(0x5d6680));
@@ -1194,7 +1196,7 @@ fn draw_pause(v: &View) {
     ];
     let rows: Vec<(&str, String)> = controls.iter().map(|&(a, k)| (a, k.to_owned())).collect();
     stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 180.0, &rows, 30.0, 20.0);
-    v.text_centered("Esc resume   ·   Q menu", cx, BOARD_Y + 180.0 + rows.len() as f32 * 30.0 + 30.0, 22.0, hex(0x9aa3b8));
+    v.text_centered("Esc resume   ·   O settings   ·   Q menu", cx, BOARD_Y + 180.0 + rows.len() as f32 * 30.0 + 30.0, 22.0, hex(0x9aa3b8));
 }
 
 // ───────────── Shadow 1v1 ─────────────
@@ -1560,8 +1562,8 @@ const TOGGLE_GAP: f32 = 20.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuHit {
     Item(usize),
-    Motion,
-    Scene,
+    /// Opens the settings screen.
+    Settings,
     Sound,
 }
 
@@ -1577,11 +1579,10 @@ fn menu_item_rect(i: usize) -> Rect {
 /// The blurb sits under the items; the toggles sit in a row under the blurb.
 fn menu_toggle_rect(items: usize, which: MenuHit) -> Rect {
     let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 50.0;
-    let left = CLASSIC_W / 2.0 - 1.5 * TOGGLE_W - TOGGLE_GAP;
+    let left = CLASSIC_W / 2.0 - TOGGLE_W - TOGGLE_GAP / 2.0;
     let slot = match which {
-        MenuHit::Motion => 0.0,
-        MenuHit::Scene => 1.0,
-        _ => 2.0,
+        MenuHit::Settings => 0.0,
+        _ => 1.0,
     };
     Rect::new(left + slot * (TOGGLE_W + TOGGLE_GAP), y, TOGGLE_W, TOGGLE_H)
 }
@@ -1609,7 +1610,7 @@ pub fn menu_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
     let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
     (0..items)
         .map(MenuHit::Item)
-        .chain([MenuHit::Motion, MenuHit::Scene, MenuHit::Sound])
+        .chain([MenuHit::Settings, MenuHit::Sound])
         .find(|&hit| {
             let r = match hit {
                 MenuHit::Item(i) => menu_item_rect(i),
@@ -1619,7 +1620,7 @@ pub fn menu_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
         })
 }
 
-pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, motion: Motion, scene_on: bool, progress: &Progress) {
+pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, scene_on: bool, progress: &Progress) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     scene::draw_menu_backdrop(&v, CLASSIC_W, Theme::classic(), scene_on);
@@ -1651,8 +1652,7 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
     }
 
     let toggles = [
-        (MenuHit::Motion, format!("MOTION: {}", motion.label())),
-        (MenuHit::Scene, format!("SCENE: {}", if scene_on { "on" } else { "off" })),
+        (MenuHit::Settings, "SETTINGS".to_owned()),
         (MenuHit::Sound, format!("SOUND: {}", if sound_on { "on" } else { "off" })),
     ];
     for (which, label) in toggles {
@@ -1665,7 +1665,7 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
     }
 
     v.text_centered(
-        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / E / N / J toggle",
+        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / E / N / J quick toggles",
         cx,
         712.0,
         18.0,
@@ -1928,8 +1928,7 @@ mod tests {
     fn menu_targets_never_overlap_and_fit_the_canvas() {
         for items in 1..=4 {
             let mut rects: Vec<Rect> = (0..items).map(menu_item_rect).collect();
-            rects.push(menu_toggle_rect(items, MenuHit::Motion));
-            rects.push(menu_toggle_rect(items, MenuHit::Scene));
+            rects.push(menu_toggle_rect(items, MenuHit::Settings));
             rects.push(menu_toggle_rect(items, MenuHit::Sound));
             for (i, a) in rects.iter().enumerate() {
                 assert!(a.x >= 0.0 && a.right() <= CLASSIC_W && a.bottom() < 700.0, "{items} items: {a:?}");
@@ -1970,6 +1969,201 @@ mod select_tests {
         assert!(blurb_y < 700.0, "blurb at {blurb_y}");
         for i in 0..n {
             assert!(!select_item_rect(i).overlaps(&select_item_rect(i + 1)));
+        }
+    }
+}
+
+
+// ───────────── Settings ─────────────
+
+/// Something clickable on the settings screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SettingsHit {
+    Tab(usize),
+    Row(usize),
+    /// A slider row, and where along the bar (0..1).
+    Slider(usize, f32),
+    /// A key row's slot (0 or 1).
+    KeySlot(usize, usize),
+    Back,
+}
+
+const SET_X: f32 = 70.0;
+const SET_W: f32 = CLASSIC_W - 140.0;
+const SET_TABS_Y: f32 = 132.0;
+const SET_TOP: f32 = 196.0;
+const SET_ROW_H: f32 = 46.0;
+const SET_CTRL_X: f32 = SET_X + 330.0;
+const SET_CTRL_W: f32 = SET_W - 330.0 - 18.0;
+
+fn settings_tab_rect(i: usize) -> Rect {
+    let w = SET_W / settings_ui::TABS.len() as f32;
+    Rect::new(SET_X + i as f32 * w, SET_TABS_Y, w - 6.0, 40.0)
+}
+
+fn settings_row_rect(i: usize) -> Rect {
+    Rect::new(SET_X, SET_TOP + i as f32 * SET_ROW_H, SET_W, SET_ROW_H - 6.0)
+}
+
+fn settings_slider_rect(i: usize) -> Rect {
+    let r = settings_row_rect(i);
+    Rect::new(SET_CTRL_X, r.y + r.h / 2.0 - 5.0, SET_CTRL_W - 110.0, 10.0)
+}
+
+fn settings_key_rect(i: usize, slot: usize) -> Rect {
+    let r = settings_row_rect(i);
+    let w = (SET_CTRL_W - 10.0) / 2.0;
+    Rect::new(SET_CTRL_X + slot as f32 * (w + 10.0), r.y + 6.0, w, r.h - 12.0)
+}
+
+fn settings_back_rect() -> Rect {
+    Rect::new(SET_X, 688.0, 150.0, 40.0)
+}
+
+/// What's under `screen_pos` on the settings screen showing `tab`.
+pub fn settings_hit(screen_pos: Vec2, tab: usize) -> Option<SettingsHit> {
+    let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
+    if settings_back_rect().contains(p) {
+        return Some(SettingsHit::Back);
+    }
+    if let Some(t) = (0..settings_ui::TABS.len()).find(|&t| settings_tab_rect(t).contains(p)) {
+        return Some(SettingsHit::Tab(t));
+    }
+    let rows = settings_ui::rows(tab);
+    let i = (0..rows.len()).find(|&i| settings_row_rect(i).contains(p))?;
+    Some(match rows[i].kind() {
+        Kind::Slider { .. } => {
+            let bar = settings_slider_rect(i);
+            // Generous hit area: anywhere over the bar's span on that row.
+            if p.x >= bar.x - 8.0 && p.x <= bar.right() + 8.0 {
+                SettingsHit::Slider(i, (p.x - bar.x) / bar.w)
+            } else {
+                SettingsHit::Row(i)
+            }
+        }
+        Kind::Key(_) => match (0..2).find(|&s| settings_key_rect(i, s).contains(p)) {
+            Some(s) => SettingsHit::KeySlot(i, s),
+            None => SettingsHit::Row(i),
+        },
+        _ => SettingsHit::Row(i),
+    })
+}
+
+/// The settings screen: tabs across the top, a row per setting (sliders, switches,
+/// key slots), a line about the focused row, and a Back button.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_settings(s: &Settings, extra: Extra, tab: usize, row: usize, slot: usize, rebinding: Option<(Bind, usize)>, hover: Option<SettingsHit>, from_pause: bool) {
+    clear_background(hex(0x0b0d14));
+    let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    scene::draw_menu_backdrop(&v, CLASSIC_W, Theme::classic(), s.scene);
+    let cx = CLASSIC_W / 2.0;
+    let gold = hex(0xffd23f);
+    let muted = hex(0x9aa3b8);
+    let faint = hex(0x5d6680);
+    v.text_centered("SETTINGS", cx, 92.0, 52.0, WHITE);
+    if from_pause {
+        v.text_centered("the run is paused", cx, 118.0, 18.0, faint);
+    }
+
+    for (i, name) in settings_ui::TABS.iter().enumerate() {
+        let r = settings_tab_rect(i);
+        let on = i == tab;
+        let hovered = hover == Some(SettingsHit::Tab(i));
+        v.rect(r.x, r.y, r.w, r.h, if on { hex(0x1c2234) } else if hovered { hex(0x161b29) } else { hex(0x10131c) });
+        if on {
+            v.rect(r.x, r.y + r.h - 3.0, r.w, 3.0, gold);
+        }
+        v.outline(r.x, r.y, r.w, r.h, 1.5, if on { hex(0x3a4258) } else { hex(0x262c3d) });
+        v.text_centered(name, r.x + r.w / 2.0, r.y + r.h / 2.0 + 7.0, 20.0, if on { WHITE } else { muted });
+    }
+
+    let rows = settings_ui::rows(tab);
+    for (i, &item) in rows.iter().enumerate() {
+        let r = settings_row_rect(i);
+        let focused = i == row;
+        v.rect(r.x, r.y, r.w, r.h, if focused { hex(0x1a2032) } else { hex(0x121621) });
+        if focused {
+            v.rect(r.x, r.y, 4.0, r.h, gold);
+        }
+        let ty = r.y + r.h / 2.0 + 7.0;
+        v.text(item.label(), r.x + 18.0, ty, 20.0, if focused { WHITE } else { muted });
+        match item.kind() {
+            Kind::Slider { .. } => {
+                let bar = settings_slider_rect(i);
+                let f = item.fraction(s);
+                v.rect(bar.x, bar.y, bar.w, bar.h, hex(0x0b0d14));
+                v.rect(bar.x, bar.y, bar.w * f, bar.h, if focused { gold } else { hex(0x8a7a3a) });
+                v.outline(bar.x, bar.y, bar.w, bar.h, 1.0, hex(0x262c3d));
+                let knob = bar.x + bar.w * f;
+                v.rect(knob - 4.0, bar.y - 5.0, 8.0, bar.h + 10.0, if focused { WHITE } else { muted });
+                v.text_right(&item.shown(s, extra), r.right() - 16.0, ty, 20.0, if focused { WHITE } else { muted });
+            }
+            Kind::Toggle => {
+                let on = item.on(s, extra);
+                let (pw, ph) = (64.0, 26.0);
+                let (px, py) = (r.right() - 16.0 - pw, r.y + (r.h - ph) / 2.0);
+                v.rounded(px, py, pw, ph, ph / 2.0, if on { hex(0x2f8f4e) } else { hex(0x2a2f40) });
+                let kx = if on { px + pw - ph / 2.0 } else { px + ph / 2.0 };
+                v.circle(kx, py + ph / 2.0, ph / 2.0 - 3.0, if on { WHITE } else { muted });
+                v.text_right(if on { "ON" } else { "OFF" }, px - 12.0, ty, 18.0, if on { hex(0x5cdb5c) } else { faint });
+            }
+            Kind::Choice => {
+                let label = item.shown(s, extra);
+                v.text_right(&format!("<  {label}  >"), r.right() - 16.0, ty, 20.0, if focused { gold } else { muted });
+            }
+            Kind::Key(b) => {
+                let keys = s.keys.get(b);
+                for (k, key) in keys.iter().enumerate() {
+                    let kr = settings_key_rect(i, k);
+                    let waiting = rebinding == Some((b, k));
+                    let picked = focused && slot == k;
+                    let hovered = hover == Some(SettingsHit::KeySlot(i, k));
+                    let bg = if waiting { hex(0x3a3214) } else if picked || hovered { hex(0x232a3f) } else { hex(0x0f121b) };
+                    v.rect(kr.x, kr.y, kr.w, kr.h, bg);
+                    v.outline(kr.x, kr.y, kr.w, kr.h, 1.5, if waiting { gold } else if picked { hex(0x9aa3b8) } else { hex(0x262c3d) });
+                    let text = if waiting { "press a key".to_owned() } else { key.map_or("none".to_owned(), crate::settings::key_name) };
+                    v.text_centered(&text, kr.x + kr.w / 2.0, kr.y + kr.h / 2.0 + 7.0, 19.0, if waiting { gold } else if key.is_some() { WHITE } else { faint });
+                }
+            }
+            Kind::Button => {
+                v.text_right("Enter", r.right() - 16.0, ty, 18.0, if focused { gold } else { faint });
+            }
+        }
+    }
+    if let Some(&item) = rows.get(row) {
+        let y = SET_TOP + rows.len() as f32 * SET_ROW_H + 18.0;
+        v.text_centered(item.hint(), cx, y, 18.0, muted);
+    }
+
+    let b = settings_back_rect();
+    let hovered = hover == Some(SettingsHit::Back);
+    v.rect(b.x, b.y, b.w, b.h, if hovered { hex(0x1c2234) } else { hex(0x10131c) });
+    v.outline(b.x, b.y, b.w, b.h, 2.0, if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
+    v.text_centered(if from_pause { "BACK TO RUN" } else { "BACK" }, b.x + b.w / 2.0, b.y + b.h / 2.0 + 7.0, 18.0, if hovered { WHITE } else { muted });
+    v.text(
+        "Up/Down row  ·  Left/Right adjust  ·  Enter toggle / rebind  ·  Tab or [ ] tabs  ·  Esc back",
+        b.right() + 16.0,
+        b.y + b.h / 2.0 + 6.0,
+        14.0,
+        faint,
+    );
+}
+
+#[cfg(test)]
+mod settings_layout_tests {
+    use super::*;
+
+    #[test]
+    fn settings_rows_fit_above_the_back_button_and_never_overlap() {
+        for tab in 0..settings_ui::TABS.len() {
+            let n = settings_ui::rows(tab).len();
+            let hint_y = SET_TOP + n as f32 * SET_ROW_H + 18.0;
+            assert!(hint_y < settings_back_rect().y - 6.0, "tab {tab}: hint at {hint_y}");
+            for i in 0..n {
+                assert!(!settings_row_rect(i).overlaps(&settings_row_rect(i + 1)) || i + 1 == n);
+                assert!(settings_key_rect(i, 0).right() < settings_key_rect(i, 1).x);
+                assert!(settings_key_rect(i, 1).right() <= settings_row_rect(i).right());
+            }
         }
     }
 }
