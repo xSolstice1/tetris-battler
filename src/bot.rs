@@ -45,7 +45,7 @@ pub struct Profile {
 }
 
 /// Easiest first.
-pub const SHADOWS: [Profile; 7] = [
+pub const SHADOWS: [Profile; 8] = [
     Profile {
         name: "JIANJIE THE SLOTH",
         blurb: "In no hurry. None at all. For your very first match.",
@@ -79,6 +79,22 @@ pub const SHADOWS: [Profile; 7] = [
         pc_search: false,
         color: 0xf4e3a1,
         portrait: "luoyi_angel",
+    },
+    Profile {
+        name: "ZHUANG HAO 哥哥",
+        blurb: "Big-brother energy. Steady, patient, a little slower than Luoyi.",
+        rank: "NOVICE+",
+        ppm: (52.0, 60.0),
+        key_gap: 0.09,
+        sloppy: 0.08,
+        misdrop: 0.0,
+        stacks_for_quads: true,
+        holds: true,
+        lookahead: false,
+        spins: false,
+        pc_search: false,
+        color: 0x6fdc8c,
+        portrait: "zhuang_hao",
     },
     Profile {
         name: "LUOYI",
@@ -908,7 +924,7 @@ mod tests {
     #[test]
     fn deon_plays_at_1_6_to_1_7_pieces_per_second() {
         for seed in 1..=4 {
-            let g = solo(SHADOWS[4], 180.0, seed);
+            let g = solo(SHADOWS[5], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: Deon topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((96.0..=102.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM (1.6-1.7 PPS)");
@@ -930,7 +946,7 @@ mod tests {
     fn deon_clears_with_quads_not_random_lines() {
         let (mut lines, mut quad_lines) = (0, 0);
         for seed in [1, 2, 4, 6, 8, 10] {
-            let g = solo(SHADOWS[4], 180.0, seed);
+            let g = solo(SHADOWS[5], 180.0, seed);
             lines += g.stats.lines;
             quad_lines += 4 * g.stats.quads;
         }
@@ -943,7 +959,7 @@ mod tests {
     fn deon_extreme_is_fast_and_spins() {
         let mut spins = 0;
         for seed in [1, 2, 4, 6] {
-            let g = solo(SHADOWS[5], 180.0, seed);
+            let g = solo(SHADOWS[6], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((110.0..=120.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
@@ -957,7 +973,7 @@ mod tests {
     fn deon_nightmare_is_fast_and_perfect_clears() {
         let mut pcs = 0;
         for seed in [1, 2, 4, 6] {
-            let g = solo(SHADOWS[6], 120.0, seed);
+            let g = solo(SHADOWS[7], 120.0, seed);
             assert!(!g.game_over, "seed {seed}: topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((160.0..=182.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
@@ -979,7 +995,7 @@ mod tests {
     /// The beginner shadows survive on their own (beating them should take playing).
     #[test]
     fn beginner_shadows_survive_alone() {
-        for p in &SHADOWS[1..4] {
+        for p in &SHADOWS[1..5] {
             for seed in 1..=8 {
                 let g = solo(*p, 180.0, seed);
                 assert!(!g.game_over, "{} seed {seed}: topped out alone", p.name);
@@ -990,14 +1006,14 @@ mod tests {
     #[test]
     fn deon_outpaces_luoyi() {
         let lines = |p: Profile| solo(p, 120.0, 11).stats.lines;
-        let (luoyi, deon) = (lines(SHADOWS[2]), lines(SHADOWS[4]));
+        let (luoyi, deon) = (lines(SHADOWS[3]), lines(SHADOWS[5]));
         assert!(deon > luoyi, "Deon {deon} lines vs Luoyi {luoyi}");
     }
 
     #[test]
     fn candidates_include_hold_and_every_column() {
         let g = Game::new(3);
-        let c = candidates(&g, SHADOWS[4]);
+        let c = candidates(&g, SHADOWS[5]);
         assert!(c.iter().any(|c| c.actions.first() == Some(&Action::Hold)));
         assert!(c.iter().all(|c| c.actions.last() == Some(&Action::HardDrop)));
         assert!(c.len() >= 20, "{} placements", c.len());

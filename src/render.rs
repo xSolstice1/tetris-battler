@@ -122,11 +122,63 @@ impl View {
         draw_texture_ex(t, self.ox + x * s, self.oy + y * s, tint, DrawTextureParams { dest_size: Some(vec2(w * s, h * s)), ..Default::default() });
     }
 
+    /// Text that may mix ASCII (the game's font) and Chinese (a small embedded subset).
+    fn text_mixed(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
+        let s = self.scale;
+        let px = (size * s).max(1.0) as u16;
+        let mut cx = self.ox + x * s;
+        for (run, cjk) in runs(t) {
+            let font = if cjk { cjk_font() } else { None };
+            draw_text_ex(run, cx, self.oy + y * s, TextParams { font: font.as_ref(), font_size: px, color: c, ..Default::default() });
+            cx += measure_text(run, font.as_ref(), px, 1.0).width;
+        }
+    }
+
+    /// Width of `text_mixed` in virtual units.
+    fn measure_mixed(&self, t: &str, size: f32) -> f32 {
+        let s = self.scale;
+        let px = (size * s).max(1.0) as u16;
+        runs(t).map(|(run, cjk)| measure_text(run, if cjk { cjk_font() } else { None }.as_ref(), px, 1.0).width).sum::<f32>() / s
+    }
+
+    fn text_mixed_centered(&self, t: &str, cx: f32, y: f32, size: f32, c: Color) {
+        self.text_mixed(t, cx - self.measure_mixed(t, size) / 2.0, y, size, c);
+    }
+
+    fn text_mixed_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
+        self.text_mixed(t, right - self.measure_mixed(t, size), y, size, c);
+    }
+
     pub fn block(&self, x: f32, y: f32, size: f32, c: Color) {
         self.rect(x, y, size, size, shade(c, 0.55));
         self.rect(x + 2.0, y + 2.0, size - 4.0, size - 4.0, c);
         self.rect(x + 2.0, y + 2.0, size - 4.0, (size - 4.0) * 0.22, shade(c, 1.25));
     }
+}
+
+/// Splits text into runs of ASCII and of other (Chinese) characters, flagging the latter.
+fn runs(t: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut rest = t;
+    std::iter::from_fn(move || {
+        let first = rest.chars().next()?;
+        let cjk = !first.is_ascii();
+        let end = rest.char_indices().find(|&(_, ch)| ch.is_ascii() == cjk).map_or(rest.len(), |(i, _)| i);
+        let (run, tail) = rest.split_at(end);
+        rest = tail;
+        Some((run, cjk))
+    })
+}
+
+/// The characters in the embedded subset (keep in step with assets/fonts/README.md).
+#[cfg(test)]
+const CJK_CHARS: &str = "哥";
+
+/// The embedded Chinese subset (see assets/fonts/README.md), loaded once.
+fn cjk_font() -> Option<Font> {
+    thread_local! {
+        static FONT: std::cell::OnceCell<Option<Font>> = const { std::cell::OnceCell::new() };
+    }
+    FONT.with(|f| f.get_or_init(|| load_ttf_font_from_bytes(include_bytes!("../assets/fonts/cjk-subset.ttf")).ok()).clone())
 }
 
 /// Virtual position of board cell (x, y). Row `HIDDEN_ROWS` is the top visible row.
@@ -706,6 +758,7 @@ fn portrait(key: &str) -> Option<Texture2D> {
     let bytes: &[u8] = match key {
         "jianjie" => include_bytes!("../assets/portraits/jianjie.png"),
         "luoyi_angel" => include_bytes!("../assets/portraits/luoyi_angel.png"),
+        "zhuang_hao" => include_bytes!("../assets/portraits/zhuang_hao.png"),
         "luoyi" => include_bytes!("../assets/portraits/luoyi.png"),
         "deon" => include_bytes!("../assets/portraits/deon.png"),
         "luoyi_extreme" => include_bytes!("../assets/portraits/luoyi_extreme.png"),
@@ -750,7 +803,7 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     let face = 62.0;
     draw_reacting_portrait(v, vs, OPP_X, BOARD_Y + 4.0, face, still);
     let tx = OPP_X + face + 14.0;
-    v.text(p.name, tx, BOARD_Y + 34.0, if p.name.len() > 8 { 30.0 } else { 40.0 }, accent);
+    v.text_mixed(p.name, tx, BOARD_Y + 34.0, if p.name.chars().count() > 8 { 30.0 } else { 40.0 }, accent);
     v.text(&format!("{}  ·  {:.0}-{:.0} PPM", p.rank, p.ppm.0, p.ppm.1), tx, BOARD_Y + 60.0, 18.0, hex(0x5d6680));
 
     // Field.
@@ -926,7 +979,7 @@ fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     let face = 150.0;
     draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 70.0, face, WHITE);
     v.text_centered(&n.to_string(), cx, BOARD_Y + BOARD_H / 2.0 + 40.0 + size * 0.3, size, with_alpha(WHITE, 0.4 + 0.6 * k));
-    v.text_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 150.0, 28.0, hex(vs.profile.color));
+    v.text_mixed_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 150.0, 28.0, hex(vs.profile.color));
 }
 
 /// A quick "GO!" as the match starts.
@@ -946,7 +999,7 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
     let face = 64.0;
     draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 14.0, face, if won { Color::new(0.5, 0.5, 0.55, 1.0) } else { WHITE });
     v.text_centered(title, cx, BOARD_Y + 130.0, 58.0, color);
-    v.text_centered(&format!("vs {} ({})", vs.profile.name, vs.profile.rank.to_lowercase()), cx, BOARD_Y + 162.0, 22.0, hex(vs.profile.color));
+    v.text_mixed_centered(&format!("vs {} ({})", vs.profile.name, vs.profile.rank.to_lowercase()), cx, BOARD_Y + 162.0, 22.0, hex(vs.profile.color));
     v.text_centered(&stats::clock(vs.time), cx, BOARD_Y + 192.0, 22.0, hex(0x9aa3b8));
 
     // You vs them, side by side.
@@ -954,7 +1007,7 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
     let (left, mid, right) = (BOARD_X + 26.0, BOARD_X + 200.0, BOARD_X + BOARD_W - 26.0);
     let top = BOARD_Y + 230.0;
     v.text_right("YOU", mid, top, 20.0, WHITE);
-    v.text_right(vs.profile.name, right, top, 20.0, hex(vs.profile.color));
+    v.text_mixed_right(vs.profile.name, right, top, 20.0, hex(vs.profile.color));
     let rows = [
         ("PPS", stats::fmt_rate(mine.pps(), 2), stats::fmt_rate(theirs.pps(), 2)),
         ("APM", stats::fmt_rate(mine.apm(), 1), stats::fmt_rate(theirs.apm(), 1)),
@@ -979,8 +1032,8 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     let cx = CLASSIC_W / 2.0;
-    v.text_centered("CHOOSE YOUR SHADOW", cx, 128.0, 52.0, WHITE);
-    v.text_centered("a true 1v1 against a bot at its own pace", cx, 166.0, 22.0, hex(0x5d6680));
+    v.text_centered("CHOOSE YOUR SHADOW", cx, 118.0, 52.0, WHITE);
+    v.text_centered("a true 1v1 against a bot at its own pace", cx, 156.0, 22.0, hex(0x5d6680));
     for (i, p) in shadows.iter().enumerate() {
         let r = select_item_rect(i);
         let active = i == selected;
@@ -991,9 +1044,9 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
         v.rect(r.x, r.y, 6.0, r.h, accent);
         let face = r.h - 16.0;
         draw_portrait(&v, p, r.x + 18.0, r.y + 8.0, face, if active { WHITE } else { Color::new(0.7, 0.7, 0.75, 1.0) });
-        v.text(p.name, r.x + 30.0 + face, r.y + r.h / 2.0 + 12.0, if p.name.len() > 8 { 28.0 } else { 34.0 }, if active { WHITE } else { hex(0x9aa3b8) });
-        v.text_right(p.rank, r.right() - 20.0, r.y + 23.0, 20.0, accent);
-        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 43.0, 18.0, hex(0x9aa3b8));
+        v.text_mixed(p.name, r.x + 30.0 + face, r.y + r.h / 2.0 + 11.0, if p.name.chars().count() > 8 { 26.0 } else { 32.0 }, if active { WHITE } else { hex(0x9aa3b8) });
+        v.text_right(p.rank, r.right() - 20.0, r.y + 21.0, 19.0, accent);
+        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 40.0, 17.0, hex(0x9aa3b8));
     }
     if let Some(p) = shadows.get(selected) {
         let y = select_item_rect(shadows.len()).y + 16.0;
@@ -1003,7 +1056,7 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>)
 }
 
 fn select_item_rect(i: usize) -> Rect {
-    Rect::new(CLASSIC_W / 2.0 - 230.0, 206.0 + i as f32 * 64.0, 460.0, 56.0)
+    Rect::new(CLASSIC_W / 2.0 - 230.0, 196.0 + i as f32 * 58.0, 460.0, 52.0)
 }
 
 /// Which shadow (if any) is under `screen_pos` on the select screen.
@@ -1149,6 +1202,23 @@ mod tests {
 #[cfg(test)]
 mod select_tests {
     use super::*;
+
+    #[test]
+    fn text_splits_into_ascii_and_chinese_runs() {
+        let r: Vec<_> = runs("ZHUANG HAO 哥哥!").collect();
+        assert_eq!(r, vec![("ZHUANG HAO ", false), ("哥哥", true), ("!", false)]);
+        assert_eq!(runs("").count(), 0);
+    }
+
+    /// Every non-ASCII character in a shadow's name must be in the embedded font subset.
+    #[test]
+    fn the_font_subset_covers_every_shadow_name() {
+        for p in crate::bot::SHADOWS {
+            for ch in p.name.chars().filter(|c| !c.is_ascii()) {
+                assert!(CJK_CHARS.contains(ch), "{ch} in {} is missing from cjk-subset.ttf (see assets/fonts/README.md)", p.name);
+            }
+        }
+    }
 
     #[test]
     fn every_shadow_row_fits_above_the_hints() {

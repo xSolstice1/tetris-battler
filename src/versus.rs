@@ -196,14 +196,14 @@ mod tests {
 
     #[test]
     fn both_fields_get_the_same_pieces() {
-        let (player, vs) = start(SHADOWS[2]);
+        let (player, vs) = start(SHADOWS[3]);
         assert_eq!(player.active.kind, vs.shadow.active.kind);
         assert_eq!(player.next, vs.shadow.next);
     }
 
     #[test]
     fn nothing_moves_during_the_countdown() {
-        let (mut player, mut vs) = start(SHADOWS[4]);
+        let (mut player, mut vs) = start(SHADOWS[5]);
         run(&mut vs, &mut player, COUNTDOWN - 0.1);
         assert_eq!(vs.shadow.stats.pieces, 0);
         assert!(!vs.fighting());
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_player_who_does_nothing_loses_to_the_shadow() {
-        let (mut player, mut vs) = start(SHADOWS[4]);
+        let (mut player, mut vs) = start(SHADOWS[5]);
         run(&mut vs, &mut player, 600.0);
         assert_eq!(vs.phase, Phase::Over { player_won: false });
         assert!(vs.take_events().contains(&VsEvent::Lost));
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn the_shadow_topping_out_is_a_win() {
-        let (mut player, mut vs) = start(SHADOWS[2]);
+        let (mut player, mut vs) = start(SHADOWS[3]);
         run(&mut vs, &mut player, COUNTDOWN + 0.1);
         vs.shadow.receive_garbage(60);
         // Each lock raises up to 8 rows: a few drops bury the shadow.
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn clears_send_their_attack_minus_what_they_cancelled() {
-        let (mut player, mut vs) = start(SHADOWS[2]);
+        let (mut player, mut vs) = start(SHADOWS[3]);
         run(&mut vs, &mut player, COUNTDOWN + 0.1);
         let clear = crate::game::LineClear {
             rows: vec![36, 37, 38, 39],
@@ -262,10 +262,10 @@ mod tests {
     /// A match between two shadows ends with a winner (the stronger, usually).
     #[test]
     fn a_sharper_shadow_beats_luoyi() {
-        let sharp = Profile { ppm: (240.0, 260.0), key_gap: 0.03, sloppy: 0.0, misdrop: 0.0, stacks_for_quads: true, ..SHADOWS[4] };
+        let sharp = Profile { ppm: (240.0, 260.0), key_gap: 0.03, sloppy: 0.0, misdrop: 0.0, stacks_for_quads: true, ..SHADOWS[5] };
         let mut deon_game = Game::new(9);
         let mut vs = Versus::new(sharp, 9, &mut deon_game);
-        let mut deon = Bot::new(SHADOWS[2], 99);
+        let mut deon = Bot::new(SHADOWS[3], 99);
         let dt = 1.0 / 60.0;
         for _ in 0..(60 * 600) {
             if vs.over() {
@@ -293,8 +293,8 @@ mod duel {
         let mut wins = 0;
         for seed in 1..=6u64 {
             let mut lg = Game::new(seed);
-            let mut vs = Versus::new(SHADOWS[4], seed, &mut lg);
-            let mut luoyi = Bot::new(SHADOWS[2], seed * 7 + 1);
+            let mut vs = Versus::new(SHADOWS[5], seed, &mut lg);
+            let mut luoyi = Bot::new(SHADOWS[3], seed * 7 + 1);
             let dt = 1.0 / 60.0;
             for _ in 0..(60 * 600) {
                 if vs.over() {
