@@ -351,9 +351,13 @@ pub fn cell_pos(x: i32, y: i32) -> (f32, f32) {
     )
 }
 
-/// The spawn row just above the field is drawn too, so freshly spawned pieces are visible.
+/// Rows of the buffer above the field that are drawn (pieces spawn and can rest there).
+pub const BUFFER_SHOWN: usize = 3;
+
+/// The spawn rows and the buffer just above the field are drawn too, so a stack that has
+/// grown into the buffer (and freshly spawned pieces) can be seen.
 fn drawable_row(y: i32) -> bool {
-    y >= HIDDEN_ROWS as i32 - 1
+    y >= (HIDDEN_ROWS - BUFFER_SHOWN) as i32
 }
 
 fn draw_mini_piece(v: &View, kind: PieceKind, cx: f32, cy: f32, color: Color) {
@@ -425,7 +429,14 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
     // flight, show the field as it was before the lock.
     let board = fx.frozen_board().unwrap_or(&game.board);
     let death = fx.death_progress();
-    for y in HIDDEN_ROWS - 1..TOTAL_ROWS {
+    // The buffer above the field: a faint band once anything is up there, so it reads as
+    // "still alive, but over the top".
+    if (HIDDEN_ROWS - BUFFER_SHOWN..HIDDEN_ROWS).any(|y| (0..WIDTH).any(|x| board.get(x, y).is_some())) {
+        let h = BUFFER_SHOWN as f32 * CELL;
+        v.rect(BOARD_X, BOARD_Y - h, BOARD_W, h, with_alpha(hex(0xff3b4f), 0.10));
+        v.rect(BOARD_X, BOARD_Y - h, BOARD_W, 1.0, with_alpha(hex(0xff3b4f), 0.35));
+    }
+    for y in HIDDEN_ROWS - BUFFER_SHOWN..TOTAL_ROWS {
         let offset = fx.row_offset(y);
         for x in 0..WIDTH {
             if let Some(cell) = board.get(x, y) {

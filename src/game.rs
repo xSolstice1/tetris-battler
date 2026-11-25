@@ -18,6 +18,9 @@ const MAX_LOCK_RESETS: u32 = 15;
 const SPAWN_X: i32 = 3;
 /// Box top sits one row above the visible field, so the piece's lower row starts visible.
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
+/// A piece whose spawn is blocked tries this many rows higher (into the buffer above the
+/// field) before it counts as a block out.
+const SPAWN_LIFT: i32 = 2;
 
 /// Garbage lines sent per clear, indexed by lines cleared.
 const LINE_ATTACK: [u32; 5] = [0, 0, 1, 2, 4];
@@ -410,20 +413,24 @@ impl Game {
         kind
     }
 
+    /// Spawns `kind`. The field goes on above the visible rows (a buffer, as in
+    /// competitive stackers): a spawn blocked by a tall stack moves up into it, and only
+    /// when there is no room even there is it a block out.
     fn spawn(&mut self, kind: PieceKind) {
+        let y = (0..=SPAWN_LIFT).map(|lift| SPAWN_Y - lift).find(|&y| self.board.fits(kind, 0, SPAWN_X, y));
         self.active = Active {
             kind,
             rot: 0,
             x: SPAWN_X,
-            y: SPAWN_Y,
+            y: y.unwrap_or(SPAWN_Y),
         };
         self.gravity_acc = 0.0;
         self.lock_timer = 0.0;
         self.lock_resets = 0;
-        self.lowest_y = SPAWN_Y;
+        self.lowest_y = self.active.y;
         self.last_move_was_rotation = false;
-        // Block out: no room to spawn.
-        if self.board.fits(kind, 0, SPAWN_X, SPAWN_Y) {
+        // Block out: no room to spawn anywhere.
+        if y.is_some() {
             self.events.push(Event::Spawned);
         } else {
             self.end_game();
@@ -455,11 +462,8 @@ impl Game {
         self.board.place(piece.kind, piece.rot, piece.x, piece.y);
         self.events.push(Event::Locked { piece });
 
-        // Lock out: the whole piece came to rest above the visible field.
-        if piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32) {
-            self.end_game();
-            return;
-        }
+        // No lock out: a piece may rest in the buffer above the visible field. The game
+        // ends on a block out (next piece can't spawn) or garbage pushing blocks off the top.
 
         self.stats.pieces += 1;
         let rows = self.board.full_rows();
@@ -851,6 +855,41 @@ mod tests {
         g.game_over = true;
         g.tick(1.0);
         assert_eq!(g.stats.time, 0.0);
+    }
+
+    #[test]
+    fn locking_above_the_visible_field_is_not_a_top_out() {
+        let mut g = game_with(PieceKind::O);
+        // A column of blocks up to the top visible row under the spawn: the O lands in the buffer.
+        for y in HIDDEN_ROWS..TOTAL_ROWS {
+            for x in 4..6 {
+                g.board.set(x, y, PieceKind::J);
+            }
+        }
+        g.apply(Action::HardDrop);
+        assert!(!g.game_over, "a lock in the buffer shouldn't end the game");
+        assert!((0..WIDTH).any(|x| g.board.get(x, HIDDEN_ROWS - 1).is_some()), "the O sits above the field");
+    }
+
+    #[test]
+    fn a_blocked_spawn_moves_up_before_it_tops_out() {
+        let mut g = game_with(PieceKind::O);
+        // Block the normal spawn rows only.
+        for x in 0..WIDTH {
+            g.board.set(x, SPAWN_Y as usize + 1, PieceKind::J);
+        }
+        g.spawn(PieceKind::T);
+        assert!(!g.game_over);
+        assert!(g.active.y < SPAWN_Y, "spawned higher, at {}", g.active.y);
+        // With the buffer full too, it's a block out.
+        let mut g = game_with(PieceKind::O);
+        for y in 0..(SPAWN_Y as usize + 2) {
+            for x in 0..WIDTH {
+                g.board.set(x, y, PieceKind::J);
+            }
+        }
+        g.spawn(PieceKind::T);
+        assert!(g.game_over);
     }
 
     #[test]

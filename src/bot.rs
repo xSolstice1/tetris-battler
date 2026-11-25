@@ -767,11 +767,9 @@ struct Chain {
     combo: i32,
 }
 
-/// None if `piece` would lock out (entirely above the visible field).
+/// Always Some: a piece may rest in the buffer above the field (its height still counts
+/// as danger). Option kept so callers can skip impossible spots in future rules.
 fn settle(board: &Board, piece: Active, t_spin: bool) -> Option<Settled> {
-    if piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32) {
-        return None;
-    }
     let mut b = board.clone();
     b.place(piece.kind, piece.rot, piece.x, piece.y);
     let rows = b.full_rows();
