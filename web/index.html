@@ -25,6 +25,35 @@
   <script>var register_plugin;</script>
   <script src="mq_js_bundle.js"></script>
   <script>
+    // Saved progress (see src/save.rs): one localStorage entry, read in two steps
+    // (length, then copy into a buffer the game allocated).
+    (function () {
+      const KEY = "block-brawl.save";
+      let pending = new Uint8Array(0);
+      miniquad_add_plugin({
+        name: "bb_storage",
+        version: 1,
+        register_plugin(importObject) {
+          importObject.env.bb_storage_load = function () {
+            let text = null;
+            try { text = localStorage.getItem(KEY); } catch (e) { console.warn("save unavailable", e); }
+            if (text === null) return -1;
+            pending = new TextEncoder().encode(text);
+            return pending.length;
+          };
+          importObject.env.bb_storage_take = function (ptr) {
+            new Uint8Array(wasm_memory.buffer, ptr, pending.length).set(pending);
+            pending = new Uint8Array(0);
+          };
+          importObject.env.bb_storage_store = function (ptr, len) {
+            const text = new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, ptr, len));
+            try { localStorage.setItem(KEY, text); } catch (e) { console.warn("could not save", e); }
+          };
+        },
+      });
+    })();
+  </script>
+  <script>
     load("block-brawl.wasm");
     // Hide the hint once the player has interacted (key or click).
     const hideHint = () => document.getElementById("hint")?.remove();
