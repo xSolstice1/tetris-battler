@@ -27,10 +27,10 @@ pub const BLUE: u32 = 0x4f8bff;
 
 /// Font sizes (virtual px).
 pub const DISPLAY: f32 = 76.0;
-pub const H1: f32 = 52.0;
-pub const H2: f32 = 30.0;
-pub const BODY: f32 = 20.0;
-pub const SMALL: f32 = 17.0;
+/// Screen titles.
+pub const TITLE: f32 = 46.0;
+/// Row labels and body copy.
+pub const BODY: f32 = 18.0;
 pub const CAPS: f32 = 14.0;
 pub const NUM: f32 = 30.0;
 

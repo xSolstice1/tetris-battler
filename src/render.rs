@@ -862,11 +862,6 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
 const PANEL_X: f32 = RIGHT_X + PANEL_W + 30.0;
 const MONSTER_PANEL_W: f32 = 320.0;
 
-/// Horizontal bar in the UI kit: a rounded groove and a gradient fill.
-fn bar(v: &View, x: f32, y: f32, w: f32, h: f32, frac: f32, fill: Color) {
-    ui::progress(v, Rect::new(x, y, w, h), frac, &ui::Bar::new(mix_colors(fill, BLACK, 0.25), mix_colors(fill, WHITE, 0.15)));
-}
-
 /// Seconds before a monster attack during which it visibly winds up.
 const ATTACK_WARN: f32 = 1.0;
 const MONSTER_PIXEL: f32 = 12.0;
@@ -1596,54 +1591,81 @@ pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>,
     let theme = shadows.get(selected).map_or_else(Theme::classic, Theme::shadow);
     scene::draw_menu_backdrop(&v, CLASSIC_W, theme, scene_on);
     let cx = CLASSIC_W / 2.0;
-    v.text_centered("CHOOSE YOUR SHADOW", cx, 118.0, 52.0, WHITE);
-    v.text_centered("a true 1v1 against a bot at its own pace", cx, 156.0, 22.0, hex(0x5d6680));
+    ui::text_shadow_centered(&v, "CHOOSE YOUR SHADOW", cx, 92.0, ui::TITLE, WHITE);
+    v.text_centered("a true 1v1 against a bot at its own pace", cx, 124.0, 18.0, hex(ui::TEXT3));
     for (i, p) in shadows.iter().enumerate() {
         let r = select_item_rect(i);
         let active = i == selected;
         let hovered = hover == Some(MenuHit::Item(i));
         let accent = hex(p.color);
-        v.rect(r.x, r.y, r.w, r.h, if active { hex(0x1c2234) } else { hex(0x141824) });
-        v.outline(r.x, r.y, r.w, r.h, 2.0, if active { accent } else if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
-        v.rect(r.x, r.y, 6.0, r.h, accent);
-        let face = r.h - 16.0;
-        draw_portrait(&v, p, r.x + 18.0, r.y + 8.0, face, if active { WHITE } else { Color::new(0.7, 0.7, 0.75, 1.0) });
-        let name_x = r.x + 30.0 + face;
-        v.text_mixed(p.name, name_x, r.y + 27.0, if p.name.chars().count() > 8 { 24.0 } else { 28.0 }, if active { WHITE } else { hex(0x9aa3b8) });
+        ui::button_bg(&v, r, 9.0, ui::State::new(active, hovered), accent);
+        if !active {
+            // A sliver of the shadow's colour, so the list reads at a glance.
+            ui::fill(&v, Rect::new(r.x + 5.0, r.y + 14.0, 3.0, r.h - 28.0), 1.5, with_alpha(accent, 0.7), with_alpha(accent, 0.4));
+        }
+        let face = r.h - 14.0;
+        let (fx, fy) = (r.x + 20.0, r.y + 7.0);
+        draw_portrait(&v, p, fx, fy, face, if active { WHITE } else { Color::new(0.7, 0.7, 0.75, 1.0) });
+        ui::stroke(&v, Rect::new(fx - 2.0, fy - 2.0, face + 4.0, face + 4.0), 3.0, 1.0, with_alpha(mix_colors(accent, WHITE, 0.3), if active { 0.9 } else { 0.5 }));
+        let name_x = fx + face + 14.0;
+        let size = if p.name.chars().count() > 8 { 22.0 } else { 26.0 };
+        text_mixed_shadow(&v, p.name, name_x, r.y + 24.0, size, if active { WHITE } else { hex(ui::INK) });
         // Your record against them, under the name.
         let rec = progress.record(p.portrait);
-        let (line, color) = match (rec.wins + rec.losses, rec.best_time) {
-            (0, _) => ("not fought yet".to_owned(), hex(0x5d6680)),
-            (_, Some(t)) => (format!("{}W-{}L  ·  best {}", rec.wins, rec.losses, stats::clock(t)), hex(0xffd23f)),
-            (_, None) => (format!("{}W-{}L", rec.wins, rec.losses), hex(0x9aa3b8)),
-        };
-        v.text(&line, name_x, r.y + 44.0, 16.0, color);
-        v.text_right(p.rank, r.right() - 20.0, r.y + 21.0, 19.0, accent);
-        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 40.0, 17.0, hex(0x9aa3b8));
+        let line_y = r.y + 37.0;
+        if rec.wins + rec.losses == 0 {
+            v.text("not fought yet", name_x, ui::baseline(line_y, 14.0), 14.0, hex(ui::TEXT3));
+        } else {
+            let wl = format!("{}W-{}L", rec.wins, rec.losses);
+            let w = ui::pill(&v, name_x, line_y, &wl, 10.0, hex(if rec.wins > 0 { ui::GOLD } else { ui::TEXT2 }), ui::Pill::Soft);
+            if let Some(t) = rec.best_time {
+                ui::pill(&v, name_x + w + 6.0, line_y, &format!("BEST {}", stats::clock(t)), 10.0, hex(ui::GOLD), ui::Pill::Soft);
+            }
+        }
+        ui::pill_right(&v, r.right() - 16.0, r.y + 17.0, p.rank, 11.0, accent, if active { ui::Pill::Solid } else { ui::Pill::Soft });
+        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 16.0, r.y + 42.0, 15.0, hex(ui::TEXT2));
     }
     if let Some(p) = shadows.get(selected) {
-        let y = select_item_rect(shadows.len()).y + 14.0;
-        v.text_centered(p.blurb, cx, y, 20.0, hex(0x9aa3b8));
-        // Your bests against them, and what beating them unlocks.
+        // About the focused shadow: the blurb, your bests, what beating them unlocks.
+        let first = select_item_rect(0);
+        let card = Rect::new(first.x, select_item_rect(shadows.len()).y + 6.0, first.w, 86.0);
+        let accent = hex(p.color);
+        ui::panel(&v, card, &ui::Panel::card().tint(accent, 0.06));
+        ui::accent_bar(&v, card, accent);
+        v.text_centered(p.blurb, cx, card.y + 28.0, ui::fit(&v, p.blurb, 18.0, card.w - 40.0), hex(ui::TEXT2));
+        ui::rule(&v, card.x + 20.0, card.y + 42.0, card.w - 40.0, Color::new(1.0, 1.0, 1.0, 0.1));
         let rec = progress.record(p.portrait);
-        let mut bits = Vec::new();
+        let line = card.y + 63.0;
+        let mut x = card.x + 20.0;
         if let Some(apm) = rec.best_apm {
-            bits.push(format!("best APM {apm:.1}"));
+            x += ui::pill(&v, x, line, &format!("BEST APM {apm:.1}"), 10.0, hex(ui::CYAN), ui::Pill::Soft) + 6.0;
         }
         if let Some(pps) = rec.best_pps {
-            bits.push(format!("best PPS {pps:.2}"));
+            x += ui::pill(&v, x, line, &format!("BEST PPS {pps:.2}"), 10.0, hex(ui::CYAN), ui::Pill::Soft) + 6.0;
+        }
+        if x == card.x + 20.0 {
+            ui::caps(&v, "NO BESTS YET", x, ui::baseline(line, 11.0), 11.0, hex(ui::TEXT4), 1.5);
         }
         if let Some(item) = Item::all().find(|&i| i.unlock() == skins::Unlock::Beat(p.portrait)) {
-            let got = if progress.unlocked(item) { "unlocked" } else { "beat them to unlock" };
-            bits.push(format!("{} {}: {got}", item.name(), item.kind()));
+            let got = progress.unlocked(item);
+            let right = card.right() - 20.0;
+            let chip_w = if got {
+                ui::pill_right(&v, right, line, "UNLOCKED", 10.0, hex(ui::GREEN), ui::Pill::Solid)
+            } else {
+                ui::pill_right(&v, right, line, "BEAT THEM TO UNLOCK", 10.0, hex(ui::ORANGE), ui::Pill::Soft)
+            };
+            let label = format!("{} {}", item.name(), item.kind());
+            let tx = right - chip_w - 8.0;
+            v.text_right(&label, tx, ui::baseline(line, 16.0), 16.0, WHITE);
+            let sw = 20.0;
+            draw_item_swatch(&v, item, progress.skin, tx - ui::text_w(&v, &label, 16.0) - sw - 8.0, line - sw / 2.0, sw);
         }
-        v.text_centered(&bits.join("  ·  "), cx, y + 24.0, 18.0, hex(0x7fd8ff));
     }
-    v.text_centered("Up/Down or mouse to choose  ·  Enter or click to fight  ·  Esc back", cx, 712.0, 18.0, hex(0x5d6680));
+    ui::hints(&v, cx, 722.0, &[("Up/Down", "or mouse to choose"), ("Enter", "or click to fight"), ("Esc", "back")], 13.0);
 }
 
 fn select_item_rect(i: usize) -> Rect {
-    Rect::new(CLASSIC_W / 2.0 - 230.0, 182.0 + i as f32 * 56.0, 460.0, 50.0)
+    Rect::new(CLASSIC_W / 2.0 - 240.0, 144.0 + i as f32 * 56.0, 480.0, 50.0)
 }
 
 /// Which shadow (if any) is under `screen_pos` on the select screen.
@@ -1686,7 +1708,7 @@ fn menu_item_rect(i: usize) -> Rect {
 
 /// The blurb sits under the items; the toggles sit in a row under the blurb.
 fn menu_toggle_rect(items: usize, which: MenuHit) -> Rect {
-    let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 50.0;
+    let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 44.0;
     let left = CLASSIC_W / 2.0 - TOGGLE_W - TOGGLE_GAP / 2.0;
     let slot = match which {
         MenuHit::Settings => 0.0,
@@ -1741,53 +1763,59 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
         draw_mini_piece(&v, *kind, x, y, with_alpha(piece_color(*kind), 0.25));
     }
 
-    v.text_centered("BLOCK", cx - 95.0, 170.0, 76.0, hex(0xffd23f));
-    v.text_centered("BRAWL", cx + 105.0, 170.0, 76.0, hex(0xff4f6d));
-    v.text_centered("a falling-block battler", cx, 210.0, 22.0, hex(0x5d6680));
-    draw_level_bar(&v, progress, cx, 242.0);
+    // The title lockup: the two words over a warm glow, a tagline between rules.
+    ui::radial(&v, cx, 124.0, 300.0, 70.0, Color::new(1.0, 0.55, 0.35, 0.10), Color::new(1.0, 0.55, 0.35, 0.0));
+    let (bw, gap) = (ui::text_w(&v, "BLOCK", ui::DISPLAY), 24.0);
+    let total = bw + gap + ui::text_w(&v, "BRAWL", ui::DISPLAY);
+    let tx = cx - total / 2.0;
+    ui::text_shadow(&v, "BLOCK", tx, 150.0, ui::DISPLAY, hex(ui::GOLD));
+    ui::text_shadow(&v, "BRAWL", tx + bw + gap, 150.0, ui::DISPLAY, hex(ui::PINK));
+    let tag = "A FALLING-BLOCK BATTLER";
+    let tw = ui::caps_w(&v, tag, 13.0, 3.0);
+    ui::caps_centered(&v, tag, cx, 182.0, 13.0, hex(ui::TEXT2), 3.0);
+    for (x, w) in [(cx - tw / 2.0 - 96.0, 84.0), (cx + tw / 2.0 + 12.0, 84.0)] {
+        ui::rule(&v, x, 177.0, w, Color::new(1.0, 1.0, 1.0, 0.18));
+    }
+    draw_level_card(&v, progress, cx, 198.0);
 
     for (i, item) in items.iter().enumerate() {
         let r = menu_item_rect(i);
-        let active = i == selected;
-        v.rect(r.x, r.y, r.w, r.h, if active { hex(0x1c2234) } else { hex(0x141824) });
-        v.outline(r.x, r.y, r.w, r.h, 2.0, if active { hex(0xffd23f) } else { hex(0x262c3d) });
-        let color = if active { WHITE } else { hex(0x9aa3b8) };
-        v.text_centered(item.title, cx, r.y + r.h / 2.0 + 12.0, 34.0, color);
+        let st = ui::State::new(i == selected, hover == Some(MenuHit::Item(i)));
+        ui::button(&v, r, item.title, 30.0, st, hex(ui::GOLD));
+        // Its number on the left, a chevron on the right when focused.
+        ui::caps(&v, &format!("0{}", i + 1), r.x + 22.0, ui::baseline(r.center().y, 12.0), 12.0, if st.focused { hex(ui::GOLD) } else { hex(ui::TEXT4) }, 1.0);
+        if st.focused {
+            ui::chevron(&v, r.right() - 26.0, r.center().y, 14.0, 1.0, hex(ui::GOLD));
+        }
     }
     if let Some(item) = items.get(selected) {
-        let y = menu_item_rect(items.len()).y + 20.0;
-        v.text_centered(item.blurb, cx, y, 20.0, hex(0x9aa3b8));
+        let y = menu_item_rect(items.len()).y + 16.0;
+        v.text_centered(item.blurb, cx, y, ui::fit(&v, item.blurb, 18.0, 600.0), hex(ui::TEXT2));
     }
 
-    let toggles = [
-        (MenuHit::Settings, "SETTINGS".to_owned()),
-        (MenuHit::Sound, format!("SOUND: {}", if sound_on { "on" } else { "off" })),
-    ];
-    for (which, label) in toggles {
+    for which in [MenuHit::Settings, MenuHit::Sound] {
         let r = menu_toggle_rect(items.len(), which);
-        let hovered = hover == Some(which);
-        v.rect(r.x, r.y, r.w, r.h, if hovered { hex(0x1c2234) } else { hex(0x10131c) });
-        v.outline(r.x, r.y, r.w, r.h, 2.0, if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
-        let color = if hovered { WHITE } else { hex(0x9aa3b8) };
-        v.text_centered(&label, r.x + r.w / 2.0, r.y + r.h / 2.0 + 7.0, 20.0, color);
+        let st = ui::State::new(false, hover == Some(which));
+        ui::button_bg(&v, r, 8.0, st, hex(ui::GOLD));
+        let col = ui::label_color(st);
+        let ty = ui::baseline(r.center().y, 17.0);
+        let ix = r.x + 26.0;
+        match which {
+            MenuHit::Settings => {
+                draw_gear(&v, ix, r.center().y, col, hex(0x161a28));
+                ui::caps(&v, "SETTINGS", ix + 18.0, ty, 17.0, col, 2.0);
+            }
+            _ => {
+                draw_speaker(&v, ix, r.center().y, sound_on, col);
+                ui::caps(&v, "SOUND", ix + 18.0, ty, 17.0, col, 2.0);
+                let (label, color) = if sound_on { ("ON", hex(ui::GREEN)) } else { ("OFF", hex(ui::TEXT2)) };
+                ui::pill_right(&v, r.right() - 12.0, r.center().y, label, 11.0, color, ui::Pill::Soft);
+            }
+        }
     }
 
-    v.text_centered(
-        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / E / N / J quick toggles",
-        cx,
-        712.0,
-        18.0,
-        hex(0x5d6680),
-    );
-    v.text_centered("made by xSolstice1  ·  github.com/xSolstice1", cx, 742.0, 16.0, hex(0x3d4458));
-}
-
-/// "LEVEL 4  ·  120 / 250 XP" over a slim bar, centred on `cx`.
-fn draw_level_bar(v: &View, progress: &Progress, cx: f32, y: f32) {
-    let (level, into, need) = progress::level_of(progress.xp);
-    let label = if level >= progress::MAX_LEVEL { format!("LEVEL {level}") } else { format!("LEVEL {level}  ·  {into} / {need} XP") };
-    v.text_centered(&label, cx, y, 18.0, hex(0x9aa3b8));
-    bar(v, cx - 110.0, y + 7.0, 220.0, 6.0, into as f32 / need.max(1) as f32, hex(0xffd23f));
+    ui::hints(&v, cx, 712.0, &[("Up/Down", "or mouse to choose"), ("Enter", "or click to play"), ("M/E/N/J", "quick toggles")], 13.0);
+    v.text_centered("made by xSolstice1  ·  github.com/xSolstice1", cx, 746.0, 14.0, hex(ui::TEXT4));
 }
 
 // ───────────── Skins ─────────────
@@ -1820,6 +1848,8 @@ const SKIN_ROW_GAP: f32 = 6.0;
 const SKIN_PREVIEW_X: f32 = 462.0;
 const PREVIEW_CELL: f32 = 18.0;
 const PREVIEW_ROWS: usize = 14;
+/// Top of the focused item's card.
+const SKIN_INFO_Y: f32 = 560.0;
 
 fn skin_item_rect(col: usize, row: usize) -> Rect {
     Rect::new(
@@ -1889,18 +1919,17 @@ fn draw_skin_preview(v: &View, x: f32, y: f32) {
         let (px, py) = at(2 + dx, 2 + dy);
         v.block(px, py, PREVIEW_CELL, color);
     }
-    // Hold and next, beside the field.
+    // Hold and next, beside the field, as in play.
     let side = x + bw + 16.0;
     let (pw, ph) = (72.0, 54.0);
-    let muted = hex(0x9aa3b8);
-    v.text("HOLD", side, y + 12.0, 16.0, muted);
-    v.rect(side, y + 18.0, pw, ph, hex(t.panel));
-    v.outline(side, y + 18.0, pw, ph, 1.5, hex(t.panel_line));
+    let muted = hex(ui::TEXT2);
+    let look = ui::Panel::themed(t.panel, t.panel_line).radius(7.0);
+    ui::caps(v, "HOLD", side, y + 12.0, 11.0, muted, 1.5);
+    ui::panel(v, Rect::new(side, y + 18.0, pw, ph), &look);
     draw_piece_sized(v, PieceKind::L, side + pw / 2.0, y + 18.0 + ph / 2.0, 12.0, piece_color(PieceKind::L));
     let next_y = y + 96.0;
-    v.text("NEXT", side, next_y, 16.0, muted);
-    v.rect(side, next_y + 6.0, pw, 150.0, hex(t.panel));
-    v.outline(side, next_y + 6.0, pw, 150.0, 1.5, hex(t.panel_line));
+    ui::caps(v, "NEXT", side, next_y, 11.0, muted, 1.5);
+    ui::panel(v, Rect::new(side, next_y + 6.0, pw, 150.0), &look);
     for (i, kind) in [PieceKind::I, PieceKind::S, PieceKind::O].into_iter().enumerate() {
         draw_piece_sized(v, kind, side + pw / 2.0, next_y + 34.0 + i as f32 * 46.0, 12.0, piece_color(kind));
     }
@@ -1912,92 +1941,100 @@ pub fn draw_skins(progress: &Progress, col: usize, row: usize, hover: Option<Ski
     let equipped = progress.skin;
     let focused = skin_column(col).get(row).copied();
     let preview = focused.map_or(equipped, |i| i.apply(equipped));
-    clear_background(hex(preview.theme.colors().backdrop));
+    let backdrop = hex(preview.theme.colors().backdrop);
+    clear_background(backdrop);
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    // A soft vignette so the panels lift off any backdrop.
+    ui::radial(&v, CLASSIC_W / 2.0, 330.0, 560.0, 460.0, Color::new(1.0, 1.0, 1.0, 0.035), Color::new(0.0, 0.0, 0.0, 0.25));
     let cx = CLASSIC_W / 2.0;
-    v.text_centered("SKINS", cx, 66.0, 52.0, WHITE);
-    draw_level_bar(&v, progress, cx, 100.0);
-    let total = Item::all().count();
-    let owned = Item::all().filter(|&i| progress.unlocked(i)).count();
-    v.text_centered(&format!("{owned} / {total} unlocked"), cx, 136.0, 16.0, hex(0x5d6680));
+    ui::text_shadow_centered(&v, "SKINS", cx, 58.0, ui::TITLE, WHITE);
+    draw_level_card(&v, progress, cx, 74.0);
 
     for (c, title) in SKIN_COLUMNS.iter().enumerate() {
         let head = skin_item_rect(c, 0);
-        v.text(title, head.x, head.y - 10.0, 20.0, if c == col { hex(0xffd23f) } else { hex(0x9aa3b8) });
+        ui::section(&v, head.x, head.y - 12.0, SKIN_COL_W, title, if c == col { hex(ui::GOLD) } else { hex(ui::TEXT2) });
         for (r, item) in skin_column(c).into_iter().enumerate() {
             let rect = skin_item_rect(c, r);
             let active = c == col && r == row;
             let hovered = hover == Some(SkinsHit::Item { col: c, row: r });
             let unlocked = progress.unlocked(item);
             let on = item.equipped_in(equipped);
-            v.rect(rect.x, rect.y, rect.w, rect.h, if active { hex(0x1c2234) } else { hex(0x141824) });
-            let line = if active { hex(0xffd23f) } else if hovered { hex(0x9aa3b8) } else if on { hex(0x5cdb5c) } else { hex(0x262c3d) };
-            v.outline(rect.x, rect.y, rect.w, rect.h, 2.0, line);
+            let st = ui::State { focused: active, hovered, disabled: !unlocked && !active && !hovered, pressed: false };
+            ui::button_bg(&v, rect, 7.0, st, hex(ui::GOLD));
+            if on && !active {
+                ui::stroke(&v, rect, 7.0, 1.0, with_alpha(hex(ui::GREEN), 0.6));
+            }
             // A swatch of the item drawn in its own look.
             let sw = rect.h - 14.0;
-            let (sx, sy) = (rect.x + 8.0, rect.y + 7.0);
-            skins::with(item.apply(equipped), || match item {
-                Item::Style(st) => v.block_styled(st, sx, sy, sw, piece_color(PieceKind::T)),
-                Item::Theme(th) => {
-                    let tc = th.colors();
-                    v.rect(sx, sy, sw, sw, hex(tc.frame));
-                    v.rect(sx + 2.0, sy + 2.0, sw - 4.0, sw - 4.0, hex(tc.field));
-                    v.rect(sx + sw / 2.0, sy + 2.0, 1.0, sw - 4.0, hex(tc.grid));
-                }
-                Item::Palette(_) => {
-                    for (k, kind) in [PieceKind::I, PieceKind::T, PieceKind::Z, PieceKind::O].into_iter().enumerate() {
-                        let h = sw / 2.0;
-                        v.rect(sx + (k % 2) as f32 * h, sy + (k / 2) as f32 * h, h, h, piece_color(kind));
-                    }
-                }
-            });
+            let (sx, sy) = (rect.x + 12.0, rect.y + 7.0);
+            draw_item_swatch(&v, item, equipped, sx, sy, sw);
             if !unlocked {
-                v.rect(sx, sy, sw, sw, Color::new(0.04, 0.05, 0.08, 0.7));
+                ui::fill(&v, Rect::new(sx - 1.0, sy - 1.0, sw + 2.0, sw + 2.0), 3.0, Color::new(0.04, 0.05, 0.08, 0.72), Color::new(0.04, 0.05, 0.08, 0.8));
                 draw_lock(&v, sx + sw / 2.0, sy + sw / 2.0);
             }
-            let text = if unlocked { if active { WHITE } else { hex(0x9aa3b8) } } else { hex(0x4a5064) };
-            v.text(item.name(), sx + sw + 8.0, rect.y + rect.h / 2.0 + 6.0, 17.0, text);
+            let text = match (unlocked, active) {
+                (true, true) => WHITE,
+                (true, false) => hex(ui::TEXT2),
+                (false, true) => hex(ui::TEXT2),
+                (false, false) => hex(ui::TEXT4),
+            };
+            v.text(item.name(), sx + sw + 8.0, ui::baseline(rect.center().y, 16.0), ui::fit(&v, item.name(), 16.0, rect.right() - sx - sw - 26.0), text);
             if on {
-                v.rect(rect.right() - 9.0, rect.y + rect.h / 2.0 - 3.0, 5.0, 6.0, hex(0x5cdb5c));
+                // Equipped: a green dot with a halo.
+                let (dx, dy) = (rect.right() - 11.0, rect.center().y);
+                ui::radial(&v, dx, dy, 8.0, 8.0, with_alpha(hex(ui::GREEN), 0.4), with_alpha(hex(ui::GREEN), 0.0));
+                v.circle(dx, dy, 3.0, hex(ui::GREEN));
             }
         }
     }
 
-    // The preview.
-    v.text("PREVIEW", SKIN_PREVIEW_X, SKIN_TOP - 10.0, 20.0, hex(0x9aa3b8));
-    skins::with(preview, || draw_skin_preview(&v, SKIN_PREVIEW_X, SKIN_TOP));
+    // The preview, framed, with the collection count.
+    let frame = skin_preview_frame();
+    let total = Item::all().count();
+    let owned = Item::all().filter(|&i| progress.unlocked(i)).count();
+    ui::section(&v, frame.x, SKIN_TOP - 12.0, frame.w - 110.0, "PREVIEW", hex(ui::TEXT2));
+    ui::pill_right(&v, frame.right(), SKIN_TOP - 17.0, &format!("{owned} / {total} UNLOCKED"), 10.0, hex(ui::TEXT2), ui::Pill::Soft);
+    ui::panel(&v, frame, &ui::Panel::card().radius(12.0));
+    skins::with(preview, || draw_skin_preview(&v, SKIN_PREVIEW_X, SKIN_TOP + 14.0));
 
     // About the focused item.
     if let Some(item) = focused {
-        let top = 560.0;
-        v.rect(SKIN_COL_X, top, CLASSIC_W - 2.0 * SKIN_COL_X, 84.0, hex(0x141824));
-        v.outline(SKIN_COL_X, top, CLASSIC_W - 2.0 * SKIN_COL_X, 84.0, 2.0, hex(0x262c3d));
-        v.text(item.name(), SKIN_COL_X + 18.0, top + 36.0, 30.0, WHITE);
-        let name_w = measure_text(item.name(), None, (30.0 * v.scale).max(1.0) as u16, 1.0).width / v.scale;
-        v.text(item.kind(), SKIN_COL_X + 30.0 + name_w, top + 36.0, 20.0, hex(0x5d6680));
-        let (status, color) = if item.equipped_in(equipped) {
-            ("EQUIPPED".to_owned(), hex(0x5cdb5c))
-        } else if progress.unlocked(item) {
-            ("Enter or click to equip".to_owned(), hex(0xffd23f))
+        let card = Rect::new(SKIN_COL_X, SKIN_INFO_Y, CLASSIC_W - 2.0 * SKIN_COL_X, 84.0);
+        let on = item.equipped_in(equipped);
+        let unlocked = progress.unlocked(item);
+        let accent = if on { hex(ui::GREEN) } else if unlocked { hex(ui::GOLD) } else { hex(ui::ORANGE) };
+        ui::panel(&v, card, &ui::Panel::card().tint(accent, 0.05));
+        ui::accent_bar(&v, card, accent);
+        let sw = 52.0;
+        draw_item_swatch(&v, item, equipped, card.x + 22.0, card.y + 16.0, sw);
+        ui::stroke(&v, Rect::new(card.x + 20.0, card.y + 14.0, sw + 4.0, sw + 4.0), 5.0, 1.0, Color::new(1.0, 1.0, 1.0, 0.18));
+        let tx = card.x + 22.0 + sw + 18.0;
+        ui::text_shadow(&v, item.name(), tx, card.y + 38.0, 30.0, WHITE);
+        let name_w = ui::text_w(&v, item.name(), 30.0);
+        ui::pill(&v, tx + name_w + 12.0, card.y + 28.0, &item.kind().to_uppercase(), 10.0, hex(ui::TEXT2), ui::Pill::Soft);
+        let line = card.y + 62.0;
+        if on {
+            ui::pill(&v, tx, line, "EQUIPPED", 11.0, hex(ui::GREEN), ui::Pill::Solid);
+        } else if unlocked {
+            let w = ui::keycap(&v, tx, line, "Enter", 14.0);
+            v.text("or click to equip", tx + w + 8.0, ui::baseline(line, 18.0), 18.0, hex(ui::GOLD));
         } else {
-            (format!("LOCKED  ·  {} to unlock", progress::unlock_hint(item)), hex(0xff9a3c))
-        };
-        v.text_mixed(&status, SKIN_COL_X + 18.0, top + 66.0, 20.0, color);
+            let w = ui::pill(&v, tx, line, "LOCKED", 11.0, hex(ui::ORANGE), ui::Pill::Soft);
+            v.text_mixed(&format!("{} to unlock", progress::unlock_hint(item)), tx + w + 10.0, ui::baseline(line, 18.0), 18.0, hex(ui::INK));
+        }
     }
 
     let back = skin_back_rect();
-    let hb = hover == Some(SkinsHit::Back);
-    v.rect(back.x, back.y, back.w, back.h, if hb { hex(0x1c2234) } else { hex(0x10131c) });
-    v.outline(back.x, back.y, back.w, back.h, 2.0, if hb { hex(0x9aa3b8) } else { hex(0x262c3d) });
-    v.text_centered("BACK", back.x + back.w / 2.0, back.y + back.h / 2.0 + 7.0, 20.0, if hb { WHITE } else { hex(0x9aa3b8) });
-    v.text_centered("Arrows or mouse to browse  ·  Enter or click to equip  ·  Esc back", cx, 724.0, 18.0, hex(0x5d6680));
+    back_button(&v, back, "BACK", hover == Some(SkinsHit::Back));
+    ui::hints(&v, cx, 724.0, &[("Arrows", "or mouse to browse"), ("Enter", "or click to equip"), ("Esc", "back")], 13.0);
 }
 
 /// A small padlock.
 fn draw_lock(v: &View, cx: f32, cy: f32) {
-    let c = hex(0x9aa3b8);
+    let c = hex(ui::TEXT2);
     v.circle_lines(cx, cy - 2.0, 4.0, 1.5, c);
-    v.rect(cx - 5.5, cy - 1.0, 11.0, 8.0, c);
+    ui::fill(v, Rect::new(cx - 5.5, cy - 1.0, 11.0, 8.0), 2.0, mix_colors(c, WHITE, 0.3), c);
+    v.rect(cx - 0.75, cy + 1.5, 1.5, 3.0, hex(0x1a1e2c));
 }
 
 #[cfg(test)]
@@ -2015,14 +2052,16 @@ mod tests {
         for (i, a) in rects.iter().enumerate() {
             assert!(a.x >= 0.0 && a.right() <= SKIN_PREVIEW_X - 10.0 && a.bottom() < 700.0, "{a:?}");
             // Lists stay clear of the info box.
-            assert!(a.bottom() < 560.0 || *a == skin_back_rect(), "{a:?}");
+            assert!(a.bottom() < SKIN_INFO_Y || *a == skin_back_rect(), "{a:?}");
             for b in &rects[i + 1..] {
                 assert!(!a.overlaps(b), "{a:?} overlaps {b:?}");
             }
         }
-        let preview_right = SKIN_PREVIEW_X + WIDTH as f32 * PREVIEW_CELL + 16.0 + 72.0;
-        assert!(preview_right <= CLASSIC_W, "preview ends at {preview_right}");
-        assert!(SKIN_TOP + PREVIEW_ROWS as f32 * PREVIEW_CELL < 560.0);
+        let frame = skin_preview_frame();
+        assert!(frame.right() <= CLASSIC_W && frame.x > skin_item_rect(SKIN_COLUMNS.len() - 1, 0).right(), "preview frame {frame:?}");
+        // The field (and its theme's outer frame) sits inside the preview frame.
+        assert!(SKIN_TOP + 14.0 + PREVIEW_ROWS as f32 * PREVIEW_CELL + 8.0 <= frame.bottom());
+        assert!(frame.bottom() < SKIN_INFO_Y);
     }
 
     #[test]
@@ -2165,59 +2204,95 @@ pub fn draw_settings(s: &Settings, extra: Extra, tab: usize, row: usize, slot: u
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     scene::draw_menu_backdrop(&v, CLASSIC_W, Theme::classic(), s.scene);
     let cx = CLASSIC_W / 2.0;
-    let gold = hex(0xffd23f);
-    let muted = hex(0x9aa3b8);
-    let faint = hex(0x5d6680);
-    v.text_centered("SETTINGS", cx, 92.0, 52.0, WHITE);
+    let gold = hex(ui::GOLD);
+    let muted = hex(ui::TEXT2);
+    let faint = hex(ui::TEXT3);
+    ui::text_shadow_centered(&v, "SETTINGS", cx, 84.0, ui::TITLE, WHITE);
     if from_pause {
-        v.text_centered("the run is paused", cx, 118.0, 18.0, faint);
+        ui::pill_centered(&v, cx, 110.0, "THE RUN IS PAUSED", 10.0, hex(ui::CYAN), ui::Pill::Soft);
     }
 
+    // Tabs: a segmented control.
+    let first = settings_tab_rect(0);
+    let last = settings_tab_rect(settings_ui::TABS.len() - 1);
+    let track = Rect::new(first.x - 4.0, first.y - 4.0, last.right() - first.x + 8.0, first.h + 8.0);
+    ui::panel(&v, track, &ui::Panel::well().radius(11.0));
     for (i, name) in settings_ui::TABS.iter().enumerate() {
         let r = settings_tab_rect(i);
         let on = i == tab;
         let hovered = hover == Some(SettingsHit::Tab(i));
-        v.rect(r.x, r.y, r.w, r.h, if on { hex(0x1c2234) } else if hovered { hex(0x161b29) } else { hex(0x10131c) });
         if on {
-            v.rect(r.x, r.y + r.h - 3.0, r.w, 3.0, gold);
+            ui::shadow(&v, r, 8.0, 8.0, 3.0, 0.45);
+            ui::fill(&v, r, 8.0, hex(0x2a3150), hex(0x1b2032));
+            ui::stroke(&v, r, 8.0, 1.0, Color::new(1.0, 1.0, 1.0, 0.12));
+            ui::shine(&v, r, 8.0, 0.16);
+            let u = Rect::new(r.center().x - r.w * 0.2, r.bottom() - 4.0, r.w * 0.4, 2.0);
+            ui::glow(&v, u, 1.0, 6.0, with_alpha(gold, 0.4));
+            ui::fill(&v, u, 1.0, gold, gold);
+        } else if hovered {
+            ui::fill(&v, r, 8.0, Color::new(1.0, 1.0, 1.0, 0.06), Color::new(1.0, 1.0, 1.0, 0.03));
         }
-        v.outline(r.x, r.y, r.w, r.h, 1.5, if on { hex(0x3a4258) } else { hex(0x262c3d) });
-        v.text_centered(name, r.x + r.w / 2.0, r.y + r.h / 2.0 + 7.0, 20.0, if on { WHITE } else { muted });
+        ui::caps_centered(&v, name, r.center().x, ui::baseline(r.center().y, 15.0), 15.0, if on { WHITE } else if hovered { hex(ui::INK) } else { muted }, 2.0);
     }
 
     let rows = settings_ui::rows(tab);
     for (i, &item) in rows.iter().enumerate() {
         let r = settings_row_rect(i);
         let focused = i == row;
-        v.rect(r.x, r.y, r.w, r.h, if focused { hex(0x1a2032) } else { hex(0x121621) });
+        let hovered = matches!(hover, Some(SettingsHit::Row(h) | SettingsHit::Slider(h, _) | SettingsHit::KeySlot(h, _)) if h == i);
         if focused {
-            v.rect(r.x, r.y, 4.0, r.h, gold);
+            ui::shadow(&v, r, 8.0, 10.0, 3.0, 0.4);
+            ui::fill(&v, r, 8.0, a_mix(hex(0x262d45), gold, 0.04), hex(0x181c2b));
+            ui::stroke(&v, r, 8.0, 1.0, with_alpha(gold, 0.45));
+            ui::shine(&v, r, 8.0, 0.12);
+            ui::accent_bar(&v, r, gold);
+        } else {
+            ui::fill(&v, r, 8.0, Color::new(0.09, 0.11, 0.16, 0.9), Color::new(0.06, 0.07, 0.11, 0.9));
+            ui::stroke(&v, r, 8.0, 1.0, Color::new(1.0, 1.0, 1.0, if hovered { 0.14 } else { 0.05 }));
         }
-        let ty = r.y + r.h / 2.0 + 7.0;
-        v.text(item.label(), r.x + 18.0, ty, 20.0, if focused { WHITE } else { muted });
+        let cy = r.center().y;
+        let ty = ui::baseline(cy, ui::BODY);
+        v.text(item.label(), r.x + 20.0, ty, ui::BODY, if focused { WHITE } else { hex(ui::INK) });
         match item.kind() {
             Kind::Slider { .. } => {
                 let bar = settings_slider_rect(i);
                 let f = item.fraction(s);
-                v.rect(bar.x, bar.y, bar.w, bar.h, hex(0x0b0d14));
-                v.rect(bar.x, bar.y, bar.w * f, bar.h, if focused { gold } else { hex(0x8a7a3a) });
-                v.outline(bar.x, bar.y, bar.w, bar.h, 1.0, hex(0x262c3d));
-                let knob = bar.x + bar.w * f;
-                v.rect(knob - 4.0, bar.y - 5.0, 8.0, bar.h + 10.0, if focused { WHITE } else { muted });
-                v.text_right(&item.shown(s, extra), r.right() - 16.0, ty, 20.0, if focused { WHITE } else { muted });
+                let look = if focused { ui::Bar::new(hex(0xff9a3c), gold) } else { ui::Bar::new(hex(0x6a5a2a), hex(0x9a8540)).glow(0.0) };
+                ui::progress(&v, bar, f, &look.stretch());
+                let knob = Rect::new(bar.x + bar.w * f - 8.0, bar.center().y - 8.0, 16.0, 16.0);
+                ui::shadow(&v, knob, 8.0, 6.0, 2.0, 0.5);
+                if focused {
+                    ui::glow(&v, knob, 8.0, 6.0, with_alpha(gold, 0.35));
+                }
+                ui::fill(&v, knob, 8.0, WHITE, hex(0xc9cfdc));
+                ui::stroke(&v, knob, 8.0, 1.0, if focused { gold } else { Color::new(0.0, 0.0, 0.0, 0.25) });
+                v.text_right(&item.shown(s, extra), r.right() - 18.0, ty, 18.0, if focused { WHITE } else { muted });
             }
             Kind::Toggle => {
                 let on = item.on(s, extra);
-                let (pw, ph) = (64.0, 26.0);
-                let (px, py) = (r.right() - 16.0 - pw, r.y + (r.h - ph) / 2.0);
-                v.rounded(px, py, pw, ph, ph / 2.0, if on { hex(0x2f8f4e) } else { hex(0x2a2f40) });
-                let kx = if on { px + pw - ph / 2.0 } else { px + ph / 2.0 };
-                v.circle(kx, py + ph / 2.0, ph / 2.0 - 3.0, if on { WHITE } else { muted });
-                v.text_right(if on { "ON" } else { "OFF" }, px - 12.0, ty, 18.0, if on { hex(0x5cdb5c) } else { faint });
+                let (pw, ph) = (54.0, 26.0);
+                let sw = Rect::new(r.right() - 18.0 - pw, cy - ph / 2.0, pw, ph);
+                if on {
+                    ui::glow(&v, sw, ph / 2.0, 6.0, with_alpha(hex(ui::GREEN), 0.25));
+                    ui::fill(&v, sw, ph / 2.0, hex(0x3fc46a), hex(0x26894a));
+                } else {
+                    ui::fill(&v, sw, ph / 2.0, hex(0x0b0d14), hex(0x1d2232));
+                }
+                ui::stroke(&v, sw, ph / 2.0, 1.0, Color::new(1.0, 1.0, 1.0, if on { 0.25 } else { 0.08 }));
+                let kx = if on { sw.right() - ph / 2.0 } else { sw.x + ph / 2.0 };
+                let k = Rect::new(kx - 10.0, cy - 10.0, 20.0, 20.0);
+                ui::shadow(&v, k, 10.0, 5.0, 2.0, 0.5);
+                ui::fill(&v, k, 10.0, WHITE, if on { hex(0xdfe5ee) } else { hex(0x9aa3b8) });
+                ui::caps_right(&v, if on { "ON" } else { "OFF" }, sw.x - 12.0, ui::baseline(cy, 13.0), 13.0, if on { hex(ui::GREEN) } else { faint }, 2.0);
             }
             Kind::Choice => {
                 let label = item.shown(s, extra);
-                v.text_right(&format!("<  {label}  >"), r.right() - 16.0, ty, 20.0, if focused { gold } else { muted });
+                let box_r = Rect::new(r.right() - 18.0 - 190.0, cy - 14.0, 190.0, 28.0);
+                ui::panel(&v, box_r, &ui::Panel::well().radius(7.0));
+                let col = if focused { gold } else { muted };
+                ui::chevron(&v, box_r.x + 14.0, cy, 10.0, -1.0, col);
+                ui::chevron(&v, box_r.right() - 14.0, cy, 10.0, 1.0, col);
+                v.text_centered(&label, box_r.center().x, ty, ui::fit(&v, &label, 18.0, box_r.w - 50.0), if focused { WHITE } else { hex(ui::INK) });
             }
             Kind::Key(b) => {
                 let keys = s.keys.get(b);
@@ -2226,35 +2301,42 @@ pub fn draw_settings(s: &Settings, extra: Extra, tab: usize, row: usize, slot: u
                     let waiting = rebinding == Some((b, k));
                     let picked = focused && slot == k;
                     let hovered = hover == Some(SettingsHit::KeySlot(i, k));
-                    let bg = if waiting { hex(0x3a3214) } else if picked || hovered { hex(0x232a3f) } else { hex(0x0f121b) };
-                    v.rect(kr.x, kr.y, kr.w, kr.h, bg);
-                    v.outline(kr.x, kr.y, kr.w, kr.h, 1.5, if waiting { gold } else if picked { hex(0x9aa3b8) } else { hex(0x262c3d) });
+                    // A keycap: a lip under a raised face.
+                    let face = Rect::new(kr.x, kr.y, kr.w, kr.h - 3.0);
+                    ui::fill(&v, Rect::new(kr.x, kr.y + 3.0, kr.w, kr.h - 3.0), 6.0, hex(0x0a0c12), hex(0x07080c));
+                    if waiting {
+                        ui::glow(&v, face, 6.0, 8.0, with_alpha(gold, 0.35));
+                        ui::fill(&v, face, 6.0, hex(0x4a3f16), hex(0x2e2810));
+                    } else if picked || hovered {
+                        ui::fill(&v, face, 6.0, hex(0x343b55), hex(0x232839));
+                    } else {
+                        ui::fill(&v, face, 6.0, hex(0x262b3e), hex(0x191d2b));
+                    }
+                    let edge = if waiting { gold } else if picked { with_alpha(gold, 0.6) } else { Color::new(1.0, 1.0, 1.0, if hovered { 0.2 } else { 0.08 }) };
+                    ui::stroke(&v, face, 6.0, 1.0, edge);
+                    ui::shine(&v, face, 6.0, 0.1);
                     let text = if waiting { "press a key".to_owned() } else { key.map_or("none".to_owned(), crate::settings::key_name) };
-                    v.text_centered(&text, kr.x + kr.w / 2.0, kr.y + kr.h / 2.0 + 7.0, 19.0, if waiting { gold } else if key.is_some() { WHITE } else { faint });
+                    let color = if waiting { gold } else if key.is_some() { WHITE } else { faint };
+                    v.text_centered(&text, face.center().x, ui::baseline(face.center().y, 18.0), 18.0, color);
                 }
             }
             Kind::Button => {
-                v.text_right("Enter", r.right() - 16.0, ty, 18.0, if focused { gold } else { faint });
+                let w = ui::keycap_w(&v, "Enter", 14.0);
+                ui::keycap(&v, r.right() - 18.0 - w, cy, "Enter", 14.0);
+                if focused {
+                    ui::glow(&v, Rect::new(r.right() - 18.0 - w, cy - 11.5, w, 21.0), 4.0, 6.0, with_alpha(gold, 0.3));
+                }
             }
         }
     }
     if let Some(&item) = rows.get(row) {
         let y = SET_TOP + rows.len() as f32 * SET_ROW_H + 18.0;
-        v.text_centered(item.hint(), cx, y, 18.0, muted);
+        v.text_centered(item.hint(), cx, y, ui::fit(&v, item.hint(), 17.0, SET_W), muted);
     }
 
     let b = settings_back_rect();
-    let hovered = hover == Some(SettingsHit::Back);
-    v.rect(b.x, b.y, b.w, b.h, if hovered { hex(0x1c2234) } else { hex(0x10131c) });
-    v.outline(b.x, b.y, b.w, b.h, 2.0, if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
-    v.text_centered(if from_pause { "BACK TO RUN" } else { "BACK" }, b.x + b.w / 2.0, b.y + b.h / 2.0 + 7.0, 18.0, if hovered { WHITE } else { muted });
-    v.text(
-        "Up/Down row  ·  Left/Right adjust  ·  Enter toggle / rebind  ·  Tab or [ ] tabs  ·  Esc back",
-        b.right() + 16.0,
-        b.y + b.h / 2.0 + 6.0,
-        14.0,
-        faint,
-    );
+    back_button(&v, b, if from_pause { "BACK TO RUN" } else { "BACK" }, hover == Some(SettingsHit::Back));
+    ui::hints(&v, cx, 745.0, &[("Up/Down", "row"), ("Left/Right", "adjust"), ("Enter", "toggle / rebind"), ("Tab/[/]", "tabs"), ("Esc", "back")], 12.0);
 }
 
 #[cfg(test)]
@@ -2332,4 +2414,72 @@ fn text_mixed_shadow(v: &View, t: &str, x: f32, y: f32, size: f32, c: Color) {
     let o = (size / 26.0).max(1.0);
     v.text_mixed(t, x + o * 0.5, y + o, size, Color::new(0.0, 0.0, 0.03, 0.55 * c.a));
     v.text_mixed(t, x, y, size, c);
+}
+
+/// A small cog.
+fn draw_gear(v: &View, cx: f32, cy: f32, c: Color, hole: Color) {
+    for i in 0..8 {
+        let a = i as f32 / 8.0 * std::f32::consts::TAU;
+        v.circle(cx + a.cos() * 6.5, cy + a.sin() * 6.5, 2.2, c);
+    }
+    v.circle(cx, cy, 6.0, c);
+    v.circle(cx, cy, 2.6, hole);
+}
+
+/// A small speaker, with waves when on.
+fn draw_speaker(v: &View, cx: f32, cy: f32, on: bool, c: Color) {
+    v.rect(cx - 7.0, cy - 3.0, 4.0, 6.0, c);
+    v.triangle(vec2(cx - 4.0, cy - 3.0), vec2(cx + 1.0, cy - 7.5), vec2(cx + 1.0, cy + 7.5), c);
+    v.triangle(vec2(cx - 4.0, cy - 3.0), vec2(cx + 1.0, cy + 7.5), vec2(cx - 4.0, cy + 3.0), c);
+    if on {
+        // Two sound waves, as arcs of dots.
+        for (r, a) in [(5.0, 0.85), (8.5, 0.55)] {
+            for k in 0..9 {
+                let t = (k as f32 / 8.0 - 0.5) * 1.8;
+                v.circle(cx + 1.5 + t.cos() * r, cy + t.sin() * r, 0.85, with_alpha(c, a));
+            }
+        }
+    } else {
+        let x = cx + 6.0;
+        v.triangle(vec2(x - 3.0, cy - 4.0), vec2(x - 2.0, cy - 4.0), vec2(x + 3.0, cy + 4.0), c);
+        v.triangle(vec2(x - 3.0, cy - 4.0), vec2(x + 3.0, cy + 4.0), vec2(x + 2.0, cy + 4.0), c);
+        v.triangle(vec2(x + 3.0, cy - 4.0), vec2(x + 2.0, cy - 4.0), vec2(x - 3.0, cy + 4.0), c);
+        v.triangle(vec2(x + 3.0, cy - 4.0), vec2(x - 3.0, cy + 4.0), vec2(x - 2.0, cy + 4.0), c);
+    }
+}
+
+/// Level badge, "LEVEL 4" and the XP to the next level over a bar, in a card `cx`-centred
+/// from `y` (50 tall).
+fn draw_level_card(v: &View, progress: &Progress, cx: f32, y: f32) {
+    let (level, into, need) = progress::level_of(progress.xp);
+    let card = Rect::new(cx - 160.0, y, 320.0, 50.0);
+    ui::panel(v, card, &ui::Panel::card().radius(12.0));
+    let gold = hex(ui::GOLD);
+    ui::level_badge(v, card.x + 28.0, card.center().y, 16.0, level, gold);
+    let (l, r) = (card.x + 56.0, card.right() - 16.0);
+    ui::caps(v, &format!("LEVEL {level}"), l, card.y + 20.0, 13.0, hex(ui::INK), 2.0);
+    let (frac, xp) = if level >= progress::MAX_LEVEL { (1.0, "MAX".to_owned()) } else { (into as f32 / need.max(1) as f32, format!("{into} / {need} XP")) };
+    ui::caps_right(v, &xp, r, card.y + 20.0, 12.0, hex(ui::TEXT2), 1.0);
+    ui::progress(v, Rect::new(l, card.y + 28.0, r - l, 10.0), frac, &ui::Bar::xp().ticks(10).glow(0.8));
+}
+
+/// The frame around the skins preview.
+fn skin_preview_frame() -> Rect {
+    Rect::new(SKIN_PREVIEW_X - 14.0, SKIN_TOP, WIDTH as f32 * PREVIEW_CELL + 16.0 + 72.0 + 28.0, PREVIEW_ROWS as f32 * PREVIEW_CELL + 28.0)
+}
+
+/// A secondary button with a back chevron.
+fn back_button(v: &View, r: Rect, label: &str, hovered: bool) {
+    let st = ui::State::new(false, hovered);
+    ui::button_bg(v, r, 8.0, st, hex(ui::GOLD));
+    let col = ui::label_color(st);
+    let w = ui::caps_w(v, label, 15.0, 2.0) + 16.0;
+    let x = r.center().x - w / 2.0;
+    ui::chevron(v, x + 4.0, r.center().y, 11.0, -1.0, col);
+    ui::caps(v, label, x + 16.0, ui::baseline(r.center().y, 15.0), 15.0, col, 2.0);
+}
+
+/// `c` nudged toward `toward`, keeping its alpha.
+fn a_mix(c: Color, toward: Color, t: f32) -> Color {
+    with_alpha(mix_colors(c, toward, t), c.a)
 }
