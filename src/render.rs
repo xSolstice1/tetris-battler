@@ -10,6 +10,8 @@ use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::piece::PieceKind;
 use crate::stats::{self, Stats};
+use crate::bot::Profile;
+use crate::versus::{Phase as VsPhase, Versus};
 
 /// Virtual canvas width for Classic and the menu; Battler adds the monster panel.
 const CLASSIC_W: f32 = 760.0;
@@ -136,16 +138,21 @@ fn drawable_row(y: i32) -> bool {
 }
 
 fn draw_mini_piece(v: &View, kind: PieceKind, cx: f32, cy: f32, color: Color) {
+    draw_piece_sized(v, kind, cx, cy, MINI, color);
+}
+
+/// A piece in its spawn orientation, centred on (cx, cy), cells `MINI` wide.
+fn draw_piece_sized(v: &View, kind: PieceKind, cx: f32, cy: f32, mini: f32, color: Color) {
     let cells = kind.cells(0);
     let (min_x, max_x) = cells.iter().fold((i32::MAX, i32::MIN), |(lo, hi), c| (lo.min(c.0), hi.max(c.0)));
     let (min_y, max_y) = cells.iter().fold((i32::MAX, i32::MIN), |(lo, hi), c| (lo.min(c.1), hi.max(c.1)));
-    let w = (max_x - min_x + 1) as f32 * MINI;
-    let h = (max_y - min_y + 1) as f32 * MINI;
+    let w = (max_x - min_x + 1) as f32 * mini;
+    let h = (max_y - min_y + 1) as f32 * mini;
     for (x, y) in cells {
         v.block(
-            cx - w / 2.0 + (x - min_x) as f32 * MINI,
-            cy - h / 2.0 + (y - min_y) as f32 * MINI,
-            MINI,
+            cx - w / 2.0 + (x - min_x) as f32 * mini,
+            cy - h / 2.0 + (y - min_y) as f32 * mini,
+            mini,
             color,
         );
     }
@@ -157,9 +164,9 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
     v.outline(x, y, w, h, 2.0, hex(0x262c3d));
 }
 
-pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&Battle>) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&Battle>, versus: Option<&Versus>) {
     clear_background(hex(0x0b0d14));
-    let width = if battle.is_some() { BATTLE_W } else { CLASSIC_W };
+    let width = if battle.is_some() || versus.is_some() { BATTLE_W } else { CLASSIC_W };
     let v = View::fit_window(fx.shake_offset(), width);
     let field_bg = hex(0x10131c);
 
@@ -312,9 +319,22 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         }
     }
 
+    if let Some(vs) = versus {
+        draw_versus_panel(&v, vs);
+    }
+
     fx.draw_top(&v);
 
     // Overlays.
+    if let Some(vs) = versus {
+        match vs.phase {
+            VsPhase::Over { player_won } => draw_versus_results(&v, vs, player_won, &game.stats),
+            VsPhase::Countdown { left } => draw_countdown(&v, vs, left),
+            VsPhase::Fighting if paused => draw_pause(&v),
+            VsPhase::Fighting => draw_go(&v, vs),
+        }
+        return;
+    }
     match battle {
         Some(b) if b.over() || game.game_over => draw_battle_results(&v, b, &game.stats),
         _ if game.game_over => draw_classic_results(&v, game),
@@ -635,6 +655,188 @@ fn draw_pause(v: &View) {
     let rows: Vec<(&str, String)> = controls.iter().map(|&(a, k)| (a, k.to_owned())).collect();
     stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 220.0, &rows, 30.0, 20.0);
     v.text_centered("Esc resume   ·   Q menu", cx, BOARD_Y + 500.0, 22.0, hex(0x9aa3b8));
+}
+
+// ───────────── Shadow 1v1 ─────────────
+
+const OPP_CELL: f32 = 22.0;
+const OPP_X: f32 = PANEL_X + 14.0;
+const OPP_Y: f32 = BOARD_Y + 78.0;
+const OPP_NEXT_X: f32 = OPP_X + WIDTH as f32 * OPP_CELL + 14.0;
+
+/// The shadow's field, live: name, board, hold / next, its numbers.
+fn draw_versus_panel(v: &View, vs: &Versus) {
+    let g = &vs.shadow;
+    let p = vs.profile;
+    let accent = hex(p.color);
+    let muted = hex(0x9aa3b8);
+    let (bw, bh) = (WIDTH as f32 * OPP_CELL, VISIBLE_ROWS as f32 * OPP_CELL);
+
+    v.text("SHADOW", PANEL_X, BOARD_Y - 8.0, 22.0, muted);
+    v.text(p.name, OPP_X, BOARD_Y + 34.0, 40.0, accent);
+    v.text(
+        &format!("{}  ·  {:.0}-{:.0} PPM", p.rank, p.ppm.0, p.ppm.1),
+        OPP_X,
+        BOARD_Y + 60.0,
+        18.0,
+        hex(0x5d6680),
+    );
+
+    // Field.
+    let lost = vs.player_won();
+    let frame = if lost { hex(0x4a5064) } else { with_alpha(accent, 0.55) };
+    v.rect(OPP_X - 3.0, OPP_Y - 3.0, bw + 6.0, bh + 6.0, frame);
+    v.rect(OPP_X, OPP_Y, bw, bh, hex(0x10131c));
+    let cell = |x: i32, y: i32| (OPP_X + x as f32 * OPP_CELL, OPP_Y + (y - HIDDEN_ROWS as i32) as f32 * OPP_CELL);
+    for y in HIDDEN_ROWS..TOTAL_ROWS {
+        for x in 0..WIDTH {
+            if let Some(c) = g.board.get(x, y) {
+                let (px, py) = cell(x as i32, y as i32);
+                v.block(px, py, OPP_CELL, if g.game_over { hex(0x4a5064) } else { cell_color(c) });
+            }
+        }
+    }
+    if !g.game_over && vs.fighting() {
+        let a = g.active;
+        let color = piece_color(a.kind);
+        let ghost = g.ghost_y();
+        for (cx, cy) in a.kind.cells(a.rot) {
+            if ghost + cy >= HIDDEN_ROWS as i32 {
+                let (px, py) = cell(a.x + cx, ghost + cy);
+                v.outline(px + 2.0, py + 2.0, OPP_CELL - 4.0, OPP_CELL - 4.0, 1.5, with_alpha(color, 0.4));
+            }
+        }
+        for (x, y) in a.cells() {
+            if y >= HIDDEN_ROWS as i32 {
+                let (px, py) = cell(x, y);
+                v.block(px, py, OPP_CELL, color);
+            }
+        }
+    }
+    // Garbage on its way to the shadow.
+    let pending = g.pending_garbage();
+    if pending > 0 {
+        let h = pending.min(VISIBLE_ROWS as u32) as f32 * OPP_CELL;
+        v.rect(OPP_X - 10.0, OPP_Y + bh - h, 5.0, h, hex(0xff4f6d));
+    }
+
+    // Hold and next, small.
+    let mini = 10.0;
+    v.text("HOLD", OPP_NEXT_X, OPP_Y + 12.0, 16.0, muted);
+    if let Some(k) = g.hold {
+        draw_piece_sized(v, k, OPP_NEXT_X + 26.0, OPP_Y + 38.0, mini, piece_color(k));
+    }
+    v.text("NEXT", OPP_NEXT_X, OPP_Y + 82.0, 16.0, muted);
+    for (i, &k) in g.next.iter().take(4).enumerate() {
+        draw_piece_sized(v, k, OPP_NEXT_X + 26.0, OPP_Y + 108.0 + i as f32 * 40.0, mini, piece_color(k));
+    }
+
+    // Its numbers.
+    let s = &g.stats;
+    let rows = [
+        ("PPS", stats::fmt_rate(s.pps(), 2)),
+        ("APM", stats::fmt_rate(s.apm(), 1)),
+        ("SENT", vs.received.to_string()),
+    ];
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let x = OPP_X + i as f32 * 80.0;
+        v.text(label, x, OPP_Y + bh + 28.0, 18.0, muted);
+        v.text(value, x, OPP_Y + bh + 56.0, 26.0, WHITE);
+    }
+    if lost {
+        v.rect(OPP_X, OPP_Y + bh / 2.0 - 40.0, bw, 70.0, Color::new(0.0, 0.0, 0.0, 0.7));
+        v.text_centered("TOPPED OUT", OPP_X + bw / 2.0, OPP_Y + bh / 2.0 + 6.0, 30.0, hex(0x9aa3b8));
+    }
+}
+
+/// "3, 2, 1" over both fields, each number popping in.
+fn draw_countdown(v: &View, vs: &Versus, left: f32) {
+    let cx = BOARD_X + BOARD_W / 2.0;
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.45));
+    let n = left.ceil().max(1.0) as u32;
+    let k = left.fract();
+    let size = 90.0 + 50.0 * k * k;
+    v.text_centered(&n.to_string(), cx, BOARD_Y + BOARD_H / 2.0 + size * 0.3, size, with_alpha(WHITE, 0.4 + 0.6 * k));
+    v.text_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 110.0, 28.0, hex(vs.profile.color));
+}
+
+/// A quick "GO!" as the match starts.
+fn draw_go(v: &View, vs: &Versus) {
+    if vs.time > 0.6 {
+        return;
+    }
+    let k = vs.time / 0.6;
+    let cx = BOARD_X + BOARD_W / 2.0;
+    v.text_centered("GO!", cx, BOARD_Y + BOARD_H / 2.0 + 30.0, 90.0 + 40.0 * k, with_alpha(hex(0xffd23f), 1.0 - k));
+}
+
+fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
+    let cx = BOARD_X + BOARD_W / 2.0;
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
+    let (title, color) = if won { ("VICTORY", hex(0xffd23f)) } else { ("DEFEAT", hex(0xff4f6d)) };
+    v.text_centered(title, cx, BOARD_Y + 110.0, 58.0, color);
+    v.text_centered(&format!("vs {} ({})", vs.profile.name, vs.profile.rank.to_lowercase()), cx, BOARD_Y + 146.0, 22.0, hex(vs.profile.color));
+    v.text_centered(&stats::clock(vs.time), cx, BOARD_Y + 180.0, 22.0, hex(0x9aa3b8));
+
+    // You vs them, side by side.
+    let theirs = &vs.shadow.stats;
+    let (left, mid, right) = (BOARD_X + 26.0, BOARD_X + 200.0, BOARD_X + BOARD_W - 26.0);
+    let top = BOARD_Y + 230.0;
+    v.text_right("YOU", mid, top, 20.0, WHITE);
+    v.text_right(vs.profile.name, right, top, 20.0, hex(vs.profile.color));
+    let rows = [
+        ("PPS", stats::fmt_rate(mine.pps(), 2), stats::fmt_rate(theirs.pps(), 2)),
+        ("APM", stats::fmt_rate(mine.apm(), 1), stats::fmt_rate(theirs.apm(), 1)),
+        ("VS", stats::fmt_rate(mine.vs(), 1), stats::fmt_rate(theirs.vs(), 1)),
+        ("pieces", mine.pieces.to_string(), theirs.pieces.to_string()),
+        ("lines", mine.lines.to_string(), theirs.lines.to_string()),
+        ("garbage sent", vs.sent.to_string(), vs.received.to_string()),
+        ("quads", mine.quads.to_string(), theirs.quads.to_string()),
+        ("max combo", mine.max_combo.to_string(), theirs.max_combo.to_string()),
+    ];
+    for (i, (label, a, b)) in rows.iter().enumerate() {
+        let y = top + 36.0 + i as f32 * 32.0;
+        v.text(label, left, y, 20.0, hex(0x9aa3b8));
+        v.text_right(a, mid, y, 20.0, WHITE);
+        v.text_right(b, right, y, 20.0, WHITE);
+    }
+    v.text_centered("Enter rematch   ·   Esc menu", cx, BOARD_Y + 615.0, 20.0, hex(0x9aa3b8));
+}
+
+/// The opponent select screen: one row per shadow (keyboard or mouse), details below.
+pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>) {
+    clear_background(hex(0x0b0d14));
+    let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    let cx = CLASSIC_W / 2.0;
+    v.text_centered("CHOOSE YOUR SHADOW", cx, 150.0, 52.0, WHITE);
+    v.text_centered("a true 1v1 against a bot at its own pace", cx, 190.0, 22.0, hex(0x5d6680));
+    for (i, p) in shadows.iter().enumerate() {
+        let r = select_item_rect(i);
+        let active = i == selected;
+        let hovered = hover == Some(MenuHit::Item(i));
+        let accent = hex(p.color);
+        v.rect(r.x, r.y, r.w, r.h, if active { hex(0x1c2234) } else { hex(0x141824) });
+        v.outline(r.x, r.y, r.w, r.h, 2.0, if active { accent } else if hovered { hex(0x9aa3b8) } else { hex(0x262c3d) });
+        v.rect(r.x, r.y, 6.0, r.h, accent);
+        v.text(p.name, r.x + 24.0, r.y + r.h / 2.0 + 12.0, 34.0, if active { WHITE } else { hex(0x9aa3b8) });
+        v.text_right(p.rank, r.right() - 20.0, r.y + 28.0, 20.0, accent);
+        v.text_right(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), r.right() - 20.0, r.y + 50.0, 18.0, hex(0x9aa3b8));
+    }
+    if let Some(p) = shadows.get(selected) {
+        let y = select_item_rect(shadows.len()).y + 16.0;
+        v.text_centered(p.blurb, cx, y, 20.0, hex(0x9aa3b8));
+    }
+    v.text_centered("Up/Down or mouse to choose  ·  Enter or click to fight  ·  Esc back", cx, 712.0, 18.0, hex(0x5d6680));
+}
+
+fn select_item_rect(i: usize) -> Rect {
+    Rect::new(CLASSIC_W / 2.0 - 230.0, 240.0 + i as f32 * 82.0, 460.0, 68.0)
+}
+
+/// Which shadow (if any) is under `screen_pos` on the select screen.
+pub fn select_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
+    let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
+    (0..items).find(|&i| select_item_rect(i).contains(p)).map(MenuHit::Item)
 }
 
 pub struct MenuItem {

@@ -3,6 +3,7 @@ mod audio;
 mod bag;
 mod battle;
 mod board;
+mod bot;
 #[cfg(debug_assertions)]
 mod debug;
 mod fx;
@@ -12,6 +13,7 @@ mod monster_art;
 mod piece;
 mod render;
 mod stats;
+mod versus;
 
 use macroquad::prelude::*;
 

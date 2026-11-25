@@ -6,7 +6,9 @@ use macroquad::miniquad::window::set_mouse_cursor;
 use macroquad::prelude::*;
 
 use crate::audio::Audio;
-use crate::battle::Battle;
+use crate::battle::{Battle, BattleEvent};
+use crate::bot::SHADOWS;
+use crate::versus::{Versus, VsEvent};
 use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::input::Input;
@@ -16,10 +18,12 @@ use crate::render::{self, MenuHit, MenuItem};
 pub enum Mode {
     Classic,
     Battler,
+    /// A 1v1 against a shadow (index into `bot::SHADOWS`).
+    Shadow,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 2] = [Mode::Classic, Mode::Battler];
+    pub const ALL: [Mode; 3] = [Mode::Classic, Mode::Battler, Mode::Shadow];
 
     fn menu_item(self) -> MenuItem {
         match self {
@@ -30,6 +34,10 @@ impl Mode {
             Mode::Battler => MenuItem {
                 title: "BATTLER",
                 blurb: "Beat a gauntlet of monsters before time runs out. They hit back with garbage.",
+            },
+            Mode::Shadow => MenuItem {
+                title: "SHADOW 1V1",
+                blurb: "Pick a shadow and play a true 1v1: same pieces, garbage both ways.",
             },
         }
     }
@@ -47,12 +55,17 @@ struct Session {
     input: Input,
     paused: bool,
     battle: Option<Battle>,
+    versus: Option<Versus>,
+    /// The shadow faced (Shadow mode), for a rematch.
+    shadow: usize,
 }
 
 impl Session {
-    fn new(mode: Mode, motion: Motion) -> Self {
-        let mut game = Game::new(new_seed());
+    fn new(mode: Mode, motion: Motion, shadow: usize) -> Self {
+        let seed = new_seed();
+        let mut game = Game::new(seed);
         let battle = (mode == Mode::Battler).then(|| Battle::new(&mut game));
+        let versus = (mode == Mode::Shadow).then(|| Versus::new(SHADOWS[shadow.min(SHADOWS.len() - 1)], seed, &mut game));
         Session {
             mode,
             game,
@@ -60,12 +73,19 @@ impl Session {
             input: Input::default(),
             paused: false,
             battle,
+            versus,
+            shadow,
         }
     }
 
-    /// The run has ended: topped out, or (Battler) out of time.
+    /// The run has ended: topped out, (Battler) out of time, or (Shadow) someone topped out.
     fn over(&self) -> bool {
-        self.game.game_over || self.battle.as_ref().is_some_and(Battle::over)
+        self.game.game_over || self.battle.as_ref().is_some_and(Battle::over) || self.versus.as_ref().is_some_and(Versus::over)
+    }
+
+    /// The player's pieces fall (not during a 1v1's countdown).
+    fn live(&self) -> bool {
+        !self.over() && self.versus.as_ref().is_none_or(Versus::fighting)
     }
 
     fn update(&mut self, dt: f32, audio: &Audio) {
@@ -82,7 +102,7 @@ impl Session {
             }
         }
 
-        if !self.over() {
+        if self.live() {
             for action in self.input.poll(dt) {
                 self.game.apply(action);
             }
@@ -93,7 +113,20 @@ impl Session {
             if let Some(battle) = &mut self.battle {
                 battle.on_game_event(&event, &mut self.game);
             }
+            if let Some(vs) = &mut self.versus {
+                vs.on_player_event(&event);
+            }
             self.fx.handle(&event);
+        }
+        if let Some(vs) = &mut self.versus {
+            vs.update(dt, &mut self.game);
+            for event in vs.take_events() {
+                match event {
+                    VsEvent::Won => audio.handle_battle(&BattleEvent::Defeated { tier: 0 }),
+                    // Topping out already played the field's own sting.
+                    VsEvent::Lost | VsEvent::Go => {}
+                }
+            }
         }
         if let Some(battle) = &mut self.battle {
             battle.update(dt, &mut self.game);
@@ -111,6 +144,8 @@ impl Session {
 
 enum Screen {
     Menu { selected: usize },
+    /// Choosing a shadow for a 1v1.
+    Select { selected: usize },
     Play(Box<Session>),
 }
 
@@ -193,7 +228,7 @@ impl App {
             Screen::Menu { .. } => {
                 if let Some(mode) = self.menu_mouse() {
                     set_mouse_cursor(CursorIcon::Default);
-                    return Some(Screen::Play(Box::new(Session::new(mode, self.motion))));
+                    return Some(self.start(mode, 0));
                 }
                 let Screen::Menu { selected } = &mut self.screen else {
                     unreachable!()
@@ -206,19 +241,25 @@ impl App {
                     *selected = (*selected + count - 1) % count;
                 }
                 if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
-                    return Some(Screen::Play(Box::new(Session::new(Mode::ALL[*selected], self.motion))));
+                    let mode = Mode::ALL[*selected];
+                    return Some(self.start(mode, 0));
                 }
                 None
             }
+            Screen::Select { .. } => self.select_update(),
             Screen::Play(session) => {
                 let to_menu = Screen::Menu {
                     selected: Mode::ALL.iter().position(|&m| m == session.mode).unwrap_or(0),
                 };
                 if session.over() {
                     if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
-                        return Some(Screen::Play(Box::new(Session::new(session.mode, self.motion))));
+                        return Some(Screen::Play(Box::new(Session::new(session.mode, self.motion, session.shadow))));
                     }
                     if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+                        // From a 1v1, back to the shadow list.
+                        if session.mode == Mode::Shadow {
+                            return Some(Screen::Select { selected: session.shadow });
+                        }
                         return Some(to_menu);
                     }
                 } else if session.paused {
@@ -238,6 +279,47 @@ impl App {
         }
     }
 
+    /// Shadow mode opens the opponent list; the others start straight away.
+    fn start(&self, mode: Mode, shadow: usize) -> Screen {
+        if mode == Mode::Shadow {
+            Screen::Select { selected: shadow }
+        } else {
+            Screen::Play(Box::new(Session::new(mode, self.motion, 0)))
+        }
+    }
+
+    /// The opponent list: keys or mouse to choose, Enter / click to fight, Esc back.
+    fn select_update(&mut self) -> Option<Screen> {
+        let Screen::Select { selected } = &mut self.screen else {
+            return None;
+        };
+        let count = SHADOWS.len();
+        let mouse = Vec2::from(mouse_position());
+        let moved = mouse != self.last_mouse;
+        self.last_mouse = mouse;
+        self.hover = render::select_hit(mouse, count);
+        set_mouse_cursor(if self.hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
+        if let (true, Some(MenuHit::Item(i))) = (moved, self.hover) {
+            *selected = i;
+        }
+        let clicked = is_mouse_button_pressed(MouseButton::Left) && self.hover.is_some();
+        if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
+            *selected = (*selected + 1) % count;
+        }
+        if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
+            *selected = (*selected + count - 1) % count;
+        }
+        if clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
+            set_mouse_cursor(CursorIcon::Default);
+            return Some(Screen::Play(Box::new(Session::new(Mode::Shadow, self.motion, *selected))));
+        }
+        if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+            let at = Mode::ALL.iter().position(|&m| m == Mode::Shadow).unwrap_or(0);
+            return Some(Screen::Menu { selected: at });
+        }
+        None
+    }
+
     fn draw(&self) {
         let sound_on = !self.audio.muted();
         match &self.screen {
@@ -245,7 +327,8 @@ impl App {
                 let items: Vec<MenuItem> = Mode::ALL.iter().map(|m| m.menu_item()).collect();
                 render::draw_menu(&items, *selected, self.hover, sound_on, self.motion);
             }
-            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, sound_on, s.battle.as_ref()),
+            Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover),
+            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, sound_on, s.battle.as_ref(), s.versus.as_ref()),
         }
     }
 }
