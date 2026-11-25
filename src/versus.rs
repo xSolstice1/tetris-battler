@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn nothing_moves_during_the_countdown() {
-        let (mut player, mut vs) = start(SHADOWS[3]);
+        let (mut player, mut vs) = start(SHADOWS[1]);
         run(&mut vs, &mut player, COUNTDOWN - 0.1);
         assert_eq!(vs.shadow.stats.pieces, 0);
         assert!(!vs.fighting());
@@ -245,9 +245,10 @@ mod tests {
 
     /// A match between two shadows ends with a winner (the stronger, usually).
     #[test]
-    fn vex_beats_deon() {
+    fn a_sharper_shadow_beats_luoyi() {
+        let sharp = Profile { ppm: (240.0, 260.0), key_gap: 0.03, sloppy: 0.0, misdrop: 0.0, stacks_for_quads: true, ..SHADOWS[1] };
         let mut deon_game = Game::new(9);
-        let mut vs = Versus::new(SHADOWS[3], 9, &mut deon_game);
+        let mut vs = Versus::new(sharp, 9, &mut deon_game);
         let mut deon = Bot::new(SHADOWS[0], 99);
         let dt = 1.0 / 60.0;
         for _ in 0..(60 * 600) {
@@ -263,6 +264,39 @@ mod tests {
             }
             vs.update(dt, &mut deon_game);
         }
-        assert_eq!(vs.phase, Phase::Over { player_won: false }, "Vex (the shadow) should win");
+        assert_eq!(vs.phase, Phase::Over { player_won: false }, "the sharp shadow should win");
+    }
+}
+#[cfg(test)]
+mod duel {
+    use super::*;
+    use crate::bot::SHADOWS;
+    /// Deon (the shadow) against Luoyi (playing as "the player"), a few seeds.
+    #[test]
+    fn deon_beats_luoyi() {
+        let mut wins = 0;
+        for seed in 1..=6u64 {
+            let mut lg = Game::new(seed);
+            let mut vs = Versus::new(SHADOWS[1], seed, &mut lg);
+            let mut luoyi = Bot::new(SHADOWS[0], seed * 7 + 1);
+            let dt = 1.0 / 60.0;
+            for _ in 0..(60 * 600) {
+                if vs.over() {
+                    break;
+                }
+                if vs.fighting() {
+                    luoyi.update(dt, &mut lg);
+                    lg.tick(dt);
+                }
+                for e in lg.take_events() {
+                    vs.on_player_event(&e);
+                }
+                vs.update(dt, &mut lg);
+            }
+            if !vs.player_won() {
+                wins += 1;
+            }
+        }
+        assert!(wins >= 5, "Deon won {wins}/6 against Luoyi");
     }
 }

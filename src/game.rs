@@ -313,6 +313,11 @@ impl Game {
         self.spawn(kind);
     }
 
+    /// The last difficult clear (quad or T-spin) is still chaining back-to-back.
+    pub fn back_to_back(&self) -> bool {
+        self.back_to_back
+    }
+
     /// The active piece is resting on the stack or floor.
     pub fn grounded(&self) -> bool {
         let a = self.active;

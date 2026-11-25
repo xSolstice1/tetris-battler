@@ -9,6 +9,7 @@
 use crate::bag::Rng;
 use crate::board::{Board, HIDDEN_ROWS, TOTAL_ROWS, WIDTH};
 use crate::game::{Action, Active, Game, attack_for};
+use crate::piece::PieceKind;
 
 /// How a shadow plays.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,64 +31,47 @@ pub struct Profile {
     pub stacks_for_quads: bool,
     /// Uses hold.
     pub holds: bool,
+    /// Also weighs where the next piece could go on each field (slower, much stronger).
+    pub lookahead: bool,
     /// UI accent colour (0xRRGGBB).
     pub color: u32,
 }
 
-pub const SHADOWS: [Profile; 4] = [
+/// Easiest first.
+pub const SHADOWS: [Profile; 2] = [
     Profile {
-        name: "DEON",
-        blurb: "Steady and patient. Clears what he can, rarely panics.",
-        rank: "AVERAGE",
-        ppm: (66.0, 74.0),
-        key_gap: 0.07,
-        sloppy: 0.18,
-        misdrop: 0.04,
+        name: "LUOYI",
+        blurb: "Still learning. Takes her time and leaves a few holes.",
+        rank: "BEGINNER",
+        ppm: (60.0, 70.0),
+        key_gap: 0.08,
+        sloppy: 0.2,
+        misdrop: 0.015,
         stacks_for_quads: false,
         holds: true,
+        lookahead: false,
+        color: 0x7fd8ff,
+    },
+    Profile {
+        name: "DEON",
+        blurb: "S-tier. Clean stack, quads back to back, punishes every mistake.",
+        rank: "S TIER",
+        ppm: (88.0, 96.0),
+        key_gap: 0.05,
+        sloppy: 0.06,
+        misdrop: 0.005,
+        stacks_for_quads: true,
+        holds: true,
+        lookahead: true,
         color: 0x5cdb5c,
-    },
-    Profile {
-        name: "MIRA",
-        blurb: "Keeps a clean stack and starts sending quads.",
-        rank: "SKILLED",
-        ppm: (130.0, 145.0),
-        key_gap: 0.055,
-        sloppy: 0.1,
-        misdrop: 0.02,
-        stacks_for_quads: true,
-        holds: true,
-        color: 0x4f8bff,
-    },
-    Profile {
-        name: "KAITO",
-        blurb: "Fast hands, heavy attack. Punishes a messy board.",
-        rank: "EXPERT",
-        ppm: (175.0, 190.0),
-        key_gap: 0.04,
-        sloppy: 0.05,
-        misdrop: 0.01,
-        stacks_for_quads: true,
-        holds: true,
-        color: 0xff9a3c,
-    },
-    Profile {
-        name: "VEX",
-        blurb: "A relentless shadow. Almost never makes a mistake.",
-        rank: "MASTER",
-        ppm: (240.0, 260.0),
-        key_gap: 0.03,
-        sloppy: 0.02,
-        misdrop: 0.0,
-        stacks_for_quads: true,
-        holds: true,
-        color: 0xff4f6d,
     },
 ];
 
 /// Where pieces appear (matches `Game`'s spawn).
 const SPAWN_X: i32 = 3;
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
+/// A sloppy pick stays within this much of the best placement's score.
+const SLOPPY_MARGIN: f32 = 6.0;
 /// The column kept open for quads.
 const WELL: usize = WIDTH - 1;
 
@@ -174,7 +158,10 @@ impl Bot {
             let n = options.len().min(12);
             2.min(n - 1) + self.rng.below((n - 2.min(n - 1)).max(1))
         } else if roll < self.profile.misdrop + self.profile.sloppy {
-            self.rng.below(options.len().min(3))
+            // Near enough: any of the top few that is almost as good as the best.
+            let best = options[0].score;
+            let close = options.iter().take(4).filter(|o| o.score >= best - SLOPPY_MARGIN).count();
+            self.rng.below(close.max(1))
         } else {
             0
         };
@@ -200,54 +187,87 @@ fn drop_y(board: &Board, a: Active) -> i32 {
     y
 }
 
-/// Every placement reachable by rotating, sliding and hard-dropping, for the
-/// current piece and (if allowed) the hold piece.
-fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
+/// Every placement reachable from `start` by rotating, sliding and hard-dropping:
+/// where it lands and the keys that get there.
+fn placements(board: &Board, start: Active, prefix: &[Action]) -> Vec<(Active, Vec<Action>)> {
     let mut out = Vec::new();
-    let pending = game.pending_garbage();
-    let mut starts = vec![(game.active, Vec::new())];
-    if profile.holds && !game.hold_used {
-        let kind = game.hold.unwrap_or(game.next[0]);
-        if kind != game.active.kind {
-            let a = Active { kind, rot: 0, x: SPAWN_X, y: SPAWN_Y };
-            if game.board.fits(kind, 0, a.x, a.y) {
-                starts.push((a, vec![Action::Hold]));
+    // Rotation states: none, cw, cw+cw, ccw.
+    let turns: [&[bool]; 4] = [&[], &[true], &[true, true], &[false]];
+    for turn in turns {
+        let mut a = start;
+        let mut keys = prefix.to_vec();
+        let mut ok = true;
+        for &cw in turn {
+            match rotate(board, a, cw) {
+                Some(r) => a = r,
+                None => ok = false,
+            }
+            keys.push(if cw { Action::RotateCw } else { Action::RotateCcw });
+        }
+        if !ok {
+            continue;
+        }
+        // Drop here, then slide to every column it can reach at this height.
+        let mut push = |s: Active, mut keys: Vec<Action>| {
+            keys.push(Action::HardDrop);
+            out.push((Active { y: drop_y(board, s), ..s }, keys));
+        };
+        push(a, keys.clone());
+        for dir in [-1, 1] {
+            let mut s = a;
+            let mut slide = keys.clone();
+            while board.fits(s.kind, s.rot, s.x + dir, s.y) {
+                s.x += dir;
+                slide.push(if dir < 0 { Action::MoveLeft } else { Action::MoveRight });
+                push(s, slide.clone());
             }
         }
     }
-    for (start, prefix) in starts {
-        // Rotation states: none, cw, cw+cw, ccw.
-        let turns: [&[bool]; 4] = [&[], &[true], &[true, true], &[false]];
-        for turn in turns {
-            let mut a = start;
-            let mut keys = prefix.clone();
-            let mut ok = true;
-            for &cw in turn {
-                match rotate(&game.board, a, cw) {
-                    Some(r) => a = r,
-                    None => ok = false,
-                }
-                keys.push(if cw { Action::RotateCw } else { Action::RotateCcw });
-            }
-            if !ok {
+    out
+}
+
+fn spawn(kind: PieceKind) -> Active {
+    Active { kind, rot: 0, x: SPAWN_X, y: SPAWN_Y }
+}
+
+/// Every placement of the current piece and (if allowed) the hold piece, scored.
+/// Shadows that look ahead also try the piece after it on each resulting field.
+fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
+    let pending = game.pending_garbage();
+    let mut starts = vec![(game.active, Vec::new(), game.next[0])];
+    if profile.holds && !game.hold_used {
+        let (kind, after) = match game.hold {
+            Some(h) => (h, game.next[0]),
+            None => (game.next[0], game.next[1]),
+        };
+        if kind != game.active.kind && game.board.fits(kind, 0, SPAWN_X, SPAWN_Y) {
+            starts.push((spawn(kind), vec![Action::Hold], after));
+        }
+    }
+    let b2b = game.back_to_back();
+    let mut out = Vec::new();
+    for (start, prefix, after) in starts {
+        for (landed, actions) in placements(&game.board, start, &prefix) {
+            let Some((field, lines)) = settle(&game.board, landed) else {
+                out.push(Candidate { score: -1e6, actions });
                 continue;
-            }
-            // Drop here, then slide to every column it can reach at this height.
-            let mut push = |s: Active, mut keys: Vec<Action>| {
-                keys.push(Action::HardDrop);
-                let landed = Active { y: drop_y(&game.board, s), ..s };
-                out.push(Candidate { score: evaluate(&game.board, landed, pending, profile), actions: keys });
             };
-            push(a, keys.clone());
-            for dir in [-1, 1] {
-                let mut s = a;
-                let mut slide = keys.clone();
-                while game.board.fits(s.kind, s.rot, s.x + dir, s.y) {
-                    s.x += dir;
-                    slide.push(if dir < 0 { Action::MoveLeft } else { Action::MoveRight });
-                    push(s, slide.clone());
-                }
-            }
+            let (clear, b2b1) = clear_score(lines, field.is_empty(), b2b, &field, pending, profile);
+            let score = if profile.lookahead && field.fits(after, 0, SPAWN_X, SPAWN_Y) {
+                // The best this field allows next, from which only its clears and final field count.
+                let best_next = placements(&field, spawn(after), &[])
+                    .into_iter()
+                    .filter_map(|(p2, _)| {
+                        let (f2, l2) = settle(&field, p2)?;
+                        let (c2, _) = clear_score(l2, f2.is_empty(), b2b1, &f2, pending, profile);
+                        Some(c2 + field_score(&f2, p2, pending, profile))
+                    })
+                    .fold(f32::MIN, f32::max);
+                clear + best_next.max(-1e5)
+            } else {
+                clear + field_score(&field, landed, pending, profile)
+            };
+            out.push(Candidate { score, actions });
         }
     }
     out
@@ -262,20 +282,47 @@ fn heights(board: &Board) -> [i32; WIDTH] {
     h
 }
 
-/// How good the field is after `piece` lands. Higher is better.
-fn evaluate(board: &Board, piece: Active, pending: u32, profile: Profile) -> f32 {
-    let mut b = board.clone();
-    // A placement entirely above the visible field would lock out.
+/// The field after `piece` locks and its full rows clear, and how many cleared.
+/// None if it would lock out (entirely above the visible field).
+fn settle(board: &Board, piece: Active) -> Option<(Board, u32)> {
     if piece.cells().iter().all(|&(_, y)| y < HIDDEN_ROWS as i32) {
-        return -1e6;
+        return None;
     }
+    let mut b = board.clone();
     b.place(piece.kind, piece.rot, piece.x, piece.y);
     let rows = b.full_rows();
-    let lines = rows.len() as u32;
     b.remove_rows(&rows);
+    Some((b, rows.len() as u32))
+}
 
-    let h = heights(&b);
-    let max_h = *h.iter().max().unwrap_or(&0);
+/// How high the stack (plus garbage on its way) stands above where it gets risky.
+fn danger(field: &Board, pending: u32, profile: Profile) -> f32 {
+    let max_h = *heights(field).iter().max().unwrap_or(&0);
+    let safe = if profile.stacks_for_quads { 11.0 } else { 8.0 };
+    ((max_h + pending as i32) as f32 - safe).max(0.0)
+}
+
+/// What a clear of `lines` is worth to this shadow, and whether back-to-back holds after it.
+fn clear_score(lines: u32, perfect: bool, b2b: bool, field: &Board, pending: u32, profile: Profile) -> (f32, bool) {
+    if lines == 0 {
+        return (0.0, b2b);
+    }
+    let quad = lines >= 4;
+    let attack = attack_for(lines, false, quad && b2b, 0, perfect) as f32;
+    if profile.stacks_for_quads && danger(field, pending, profile) < 1.0 {
+        // Building: quads (back to back if possible) are the point; small clears waste the stack
+        // and break the chain.
+        let s = if quad { 22.0 + if b2b { 8.0 } else { 0.0 } } else { -7.0 + lines as f32 - if b2b { 4.0 } else { 0.0 } };
+        (s + 1.5 * attack, quad)
+    } else {
+        // Surviving (or not a planner): any clear helps, bigger ones more.
+        (3.4 * lines as f32 + 1.5 * attack, quad)
+    }
+}
+
+/// How good a field is to keep playing on. Higher is better.
+fn field_score(b: &Board, piece: Active, pending: u32, profile: Profile) -> f32 {
+    let h = heights(b);
     let mut holes = 0;
     let mut covered = 0;
     for x in 0..WIDTH {
@@ -307,27 +354,18 @@ fn evaluate(board: &Board, piece: Active, pending: u32, profile: Profile) -> f32
         }
     }
     let landing = TOTAL_ROWS as i32 - piece.y;
-
-    // Danger rises sharply as the stack nears the top; garbage on the way adds to it.
-    let danger = ((max_h + pending as i32) as f32 - 8.0).max(0.0);
-    let mut score = -0.5 * agg as f32 - 7.5 * holes as f32 - 1.2 * covered as f32 - 0.5 * bump as f32
-        - 0.6 * landing as f32
+    let danger = danger(b, pending, profile);
+    // A quad builder doesn't mind height while it's safe: it's the quad in waiting.
+    let building = quads && danger < 1.0;
+    let (w_agg, w_land) = if building { (0.12, 0.2) } else { (0.5, 0.6) };
+    let mut score = -w_agg * agg as f32 - 7.5 * holes as f32 - 1.2 * covered as f32 - 0.5 * bump as f32
+        - w_land * landing as f32
         - 2.0 * shafts
         - 2.5 * danger * danger;
-
-    let attack = attack_for(lines, false, false, 0, b.is_empty()) as f32;
-    if quads && danger < 1.0 {
-        // Building: keep the well open and clean; only quads are worth clearing.
+    if building {
+        // Keep the well open and clean, and the stack beside it ready for a quad.
         let well_depth = (h[..WELL].iter().min().copied().unwrap_or(0) - h[WELL]).max(0);
         score += 0.8 * well_depth.min(4) as f32 - 3.0 * h[WELL] as f32;
-        score += match lines {
-            0 => 0.0,
-            4 => 14.0,
-            n => -3.0 + n as f32,
-        };
-    } else {
-        // Surviving (or not a planner): any clear helps, bigger ones more.
-        score += 3.4 * lines as f32 + 1.5 * attack;
     }
     score
 }
@@ -353,12 +391,12 @@ mod tests {
     }
 
     #[test]
-    fn deon_plays_at_about_70_pieces_per_minute() {
+    fn deon_plays_at_about_90_pieces_per_minute() {
         for seed in 1..=4 {
-            let g = solo(SHADOWS[0], 180.0, seed);
+            let g = solo(SHADOWS[1], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: Deon topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
-            assert!((66.0..=74.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
+            assert!((87.0..=93.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
         }
     }
 
@@ -373,16 +411,16 @@ mod tests {
     }
 
     #[test]
-    fn stronger_shadows_attack_harder() {
-        let apm = |p: Profile| solo(p, 120.0, 11).stats.apm().unwrap();
-        let (deon, vex) = (apm(SHADOWS[0]), apm(SHADOWS[3]));
-        assert!(vex > deon * 1.5, "Vex {vex:.1} APM vs Deon {deon:.1}");
+    fn deon_outpaces_luoyi() {
+        let lines = |p: Profile| solo(p, 120.0, 11).stats.lines;
+        let (luoyi, deon) = (lines(SHADOWS[0]), lines(SHADOWS[1]));
+        assert!(deon > luoyi, "Deon {deon} lines vs Luoyi {luoyi}");
     }
 
     #[test]
     fn candidates_include_hold_and_every_column() {
         let g = Game::new(3);
-        let c = candidates(&g, SHADOWS[0]);
+        let c = candidates(&g, SHADOWS[1]);
         assert!(c.iter().any(|c| c.actions.first() == Some(&Action::Hold)));
         assert!(c.iter().all(|c| c.actions.last() == Some(&Action::HardDrop)));
         assert!(c.len() >= 20, "{} placements", c.len());
@@ -396,15 +434,15 @@ mod probe {
     #[ignore]
     fn probe_survival() {
         let mut list = SHADOWS.to_vec();
-        list.push(Profile { sloppy: 0.0, misdrop: 0.0, name: "PERFECT", ..SHADOWS[3] });
+        list.push(Profile { ppm: (240.0, 260.0), key_gap: 0.03, sloppy: 0.0, misdrop: 0.0, stacks_for_quads: true, name: "PERFECT", ..SHADOWS[1] });
         for (i, p) in list.iter().enumerate() {
-            for seed in [1u64, 2, 4, 6, 8, 10] {
+            for seed in [1u64, 2, 4, 6, 8, 10, 12, 14, 16, 18] {
                 let mut g = Game::new(seed);
                 g.set_level(1);
                 let mut bot = Bot::new(*p, seed);
                 let dt = 1.0 / 60.0;
                 let mut t = 0.0;
-                while t < 120.0 && !g.game_over {
+                while t < 180.0 && !g.game_over {
                     bot.update(dt, &mut g);
                     g.tick(dt);
                     g.take_events();
