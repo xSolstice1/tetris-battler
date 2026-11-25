@@ -184,6 +184,11 @@ pub const SHADOWS: [Profile; 8] = [
 /// Where pieces appear (matches `Game`'s spawn).
 const SPAWN_X: i32 = 3;
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
+/// Stack height plus incoming garbage (rows) from which a shadow plays to survive.
+const THREAT: u32 = 13;
+/// Rows of the visible field, from the top, around the spawn that must stay clear.
+const SPAWN_ZONE_ROWS: usize = 3;
+
 /// A sloppy pick stays within this much of the best placement's score.
 const SLOPPY_MARGIN: f32 = 3.0;
 /// The column kept open for quads.
@@ -283,12 +288,23 @@ impl Bot {
 
     /// Picks the keys for the current piece.
     fn choose(&mut self, game: &Game) -> Vec<Action> {
-        let mut options = candidates(game, self.profile);
+        // Guardrail: under threat (a tall stack, garbage on the way) every shadow plays to
+        // survive, whatever its style: no slips, a look at the next piece, and clears
+        // (which also cancel the incoming garbage) over building.
+        // Incoming garbage counts double: it's coming whatever the shadow does.
+        let threat = *heights(&game.board).iter().max().unwrap_or(&0) as u32 + 2 * game.pending_garbage();
+        let in_danger = threat >= THREAT;
+        let profile = if in_danger {
+            Profile { sloppy: 0.0, misdrop: 0.0, lookahead: true, stacks_for_quads: threat < THREAT + 3 && self.profile.stacks_for_quads, ..self.profile }
+        } else {
+            self.profile
+        };
+        let mut options = candidates(game, profile);
         if options.is_empty() {
             return vec![Action::HardDrop];
         }
         options.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let roll = self.rand01();
+        let roll = if in_danger { 1.0 } else { self.rand01() };
         let pick = if roll < self.profile.misdrop {
             let n = options.len().min(12);
             2.min(n - 1) + self.rng.below((n - 2.min(n - 1)).max(1))
@@ -722,7 +738,12 @@ fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
             };
             let (clear, chain) = clear_score(&first, now, pending, profile);
             let field = first.field;
-            let score = if profile.lookahead && field.fits(after, 0, SPAWN_X, SPAWN_Y) {
+            // Guardrail: never choose a field the next piece can't spawn into while another
+            // choice exists (that's a self-inflicted block out).
+            let blocks_next = !field.fits(after, 0, SPAWN_X, SPAWN_Y);
+            let score = if blocks_next {
+                clear + field_score(&field, p.piece, pending, profile) - 1e5
+            } else if profile.lookahead {
                 // The best this field allows next, from which only its clears and final field count.
                 let best_next = placements(&field, spawn(after), &[])
                     .into_iter()
@@ -880,6 +901,12 @@ fn field_score_plan(b: &Board, piece: Active, pending: u32, profile: Profile, we
     }
     let landing = TOTAL_ROWS as i32 - piece.y;
     let danger = danger(b, pending, profile);
+    // Blocks in the spawn area (the top visible rows, middle columns) are one piece from a
+    // block out: keep it clear.
+    let spawn_zone = (HIDDEN_ROWS..HIDDEN_ROWS + SPAWN_ZONE_ROWS)
+        .flat_map(|y| (3..7).map(move |x| (x, y)))
+        .filter(|&(x, y)| b.get(x, y).is_some())
+        .count() as f32;
     // A quad builder doesn't mind height while it's safe: it's the quad in waiting.
     let building = quads && danger < 1.0;
     let (w_agg, w_land) = if building { (0.12, 0.2) } else { (0.5, 0.6) };
@@ -887,7 +914,8 @@ fn field_score_plan(b: &Board, piece: Active, pending: u32, profile: Profile, we
     let mut score = -w_agg * agg as f32 - w_hole * holes as f32 - 1.6 * covered as f32 - 0.5 * bump as f32
         - w_land * landing as f32
         - 2.0 * shafts
-        - 2.5 * danger * danger;
+        - 2.5 * danger * danger
+        - 40.0 * spawn_zone;
     if building && profile.spins {
         // A spinner keeps a T-spin slot open for its next T: the slot's empty cells aren't
         // holes, and a ready slot is worth a lot.
@@ -1001,6 +1029,32 @@ mod tests {
             for seed in 1..=8 {
                 let g = solo(*p, 180.0, seed);
                 assert!(!g.game_over, "{} seed {seed}: topped out alone", p.name);
+            }
+        }
+    }
+
+    /// Guardrail: with a tall stack, every shadow keeps the spawn clear rather than
+    /// stacking into it, and never picks a move the next piece can't spawn after.
+    #[test]
+    fn shadows_never_block_their_own_spawn_when_they_can_avoid_it() {
+        for p in SHADOWS {
+            for seed in 1..=4u64 {
+                let mut g = Game::new(seed);
+                // A tall stack with a low channel on the right: the safe play is over there.
+                for y in HIDDEN_ROWS + 3..TOTAL_ROWS {
+                    for x in 0..7 {
+                        if (x + y) % 9 != 0 {
+                            g.board.set(x, y, PieceKind::J);
+                        }
+                    }
+                }
+                let mut bot = Bot::new(p, seed);
+                for k in bot.choose(&g) {
+                    g.apply(k);
+                }
+                assert!(!g.game_over, "{} seed {seed} topped itself out", p.name);
+                let next = g.active.kind;
+                assert!(g.board.fits(next, 0, SPAWN_X, SPAWN_Y), "{} seed {seed} blocked its next spawn", p.name);
             }
         }
     }
@@ -1138,6 +1192,77 @@ mod timing {
                 g.take_events();
             }
             println!("{:15} avg {:.2} ms  worst {:.2} ms", p.name, total / n as f64, worst);
+        }
+    }
+}
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+    /// A shadow's average attack alone over a few 2-minute games.
+    pub fn solo_apm(p: Profile) -> f32 {
+        let mut total = 0.0;
+        for seed in 1..=3u64 {
+            let mut g = Game::new(seed);
+            g.set_level(1);
+            let mut bot = Bot::new(p, seed);
+            let dt = 1.0 / 60.0;
+            let mut t = 0.0;
+            while t < 120.0 && !g.game_over {
+                bot.update(dt, &mut g);
+                g.tick(dt);
+                g.take_events();
+                t += dt;
+            }
+            total += g.stats.apm().unwrap_or(0.0);
+        }
+        total / 3.0
+    }
+}
+
+#[cfg(test)]
+mod pressure {
+    use super::*;
+    use crate::bag::Rng;
+
+    /// Each shadow under a steady garbage stream: how and when it dies
+    /// (`cargo test --release pressure -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn probe_pressure() {
+        for p in SHADOWS {
+            // An evenly matched opponent: garbage at about 80% of this shadow's own attack.
+            let solo_apm = super::tests_support::solo_apm(p);
+            let per_sec = (0.8 * solo_apm / 60.0).max(0.05);
+            let mut deaths = Vec::new();
+            for seed in 1..=12u64 {
+                let mut g = Game::new(seed);
+                g.set_level(1);
+                let mut bot = Bot::new(p, seed);
+                let mut rng = Rng::new(seed * 31);
+                let dt = 1.0 / 60.0;
+                let (mut t, mut next_hit) = (0.0f32, 3.0f32);
+                let mut last_board = g.board.clone();
+                let mut last_pending = 0;
+                while t < 180.0 && !g.game_over {
+                    if t >= next_hit {
+                        let lines = 1 + rng.below(4) as u32;
+                        g.receive_garbage(lines);
+                        next_hit += lines as f32 / per_sec * (0.6 + rng.below(80) as f32 / 100.0);
+                    }
+                    last_board = g.board.clone();
+                    last_pending = g.pending_garbage();
+                    bot.update(dt, &mut g);
+                    g.tick(dt);
+                    g.take_events();
+                    t += dt;
+                }
+                if g.game_over {
+                    let hs = heights(&last_board);
+                    let cols: String = hs.iter().map(|h| char::from_digit((*h as u32).min(35), 36).unwrap()).collect();
+                    deaths.push(format!("s{seed}@{t:.0}s [{cols}] p{last_pending}"));
+                }
+            }
+            println!("{:18} vs {:.0} APM: died {}/12: {}", p.name, 0.8 * solo_apm, deaths.len(), deaths.join(", "));
         }
     }
 }

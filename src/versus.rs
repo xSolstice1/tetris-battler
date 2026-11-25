@@ -301,7 +301,7 @@ mod duel {
     #[test]
     fn deon_beats_luoyi() {
         let mut wins = 0;
-        for seed in 1..=6u64 {
+        for seed in 1..=20u64 {
             let mut lg = Game::new(seed);
             let mut vs = Versus::new(SHADOWS[5], seed, &mut lg);
             let mut luoyi = Bot::new(SHADOWS[3], seed * 7 + 1);
@@ -323,6 +323,6 @@ mod duel {
                 wins += 1;
             }
         }
-        assert!(wins >= 5, "Deon won {wins}/6 against Luoyi");
+        assert!(wins >= 16, "Deon won {wins}/20 against Luoyi");
     }
 }
