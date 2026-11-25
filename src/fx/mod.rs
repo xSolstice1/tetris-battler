@@ -60,13 +60,14 @@ const ACTIVE_MAX_LAG: f32 = 0.4;
 pub enum Motion {
     /// Hard-drop flight, stack collapse and active-piece glide.
     Full,
-    /// Every frame shows the real board: no flight, collapse or glide.
-    /// Particles, shake and callouts stay, as they don't misrepresent the field.
+    /// Every frame shows the real board, still: no flight, collapse, glide or screen
+    /// shake. Clear bursts, lock flashes, the border flash and callouts stay, as they
+    /// don't move or misrepresent the field. The default.
+    #[default]
     Competitive,
     /// No animation on the field: the real board, and no particles, shake, flashes
     /// or callouts. Sound is unaffected, and so is everything off the field (that's
-    /// the separate scene-effects setting, src/scene). The default.
-    #[default]
+    /// the separate scene-effects setting, src/scene).
     Off,
 }
 
@@ -653,7 +654,8 @@ impl Fx {
     }
 
     pub fn shake_offset(&self) -> Vec2 {
-        if !self.motion.animated() {
+        // Only full motion shakes the screen: it moves the board under a competitive player.
+        if self.motion != Motion::Full {
             return Vec2::ZERO;
         }
         self.shake.offset()
@@ -967,6 +969,18 @@ mod tests {
         assert_eq!(Motion::Competitive.toggled(), Motion::Off);
         assert_eq!(Motion::Off.toggled(), Motion::Full);
         assert!(Motion::Off.true_board() && !Motion::Off.animated());
+    }
+
+    #[test]
+    fn competitive_is_the_default_and_never_shakes() {
+        assert_eq!(Motion::default(), Motion::Competitive);
+        let mut fx = Fx::new(Motion::Competitive);
+        fx.shake.add(1.0);
+        assert_eq!(fx.shake_offset(), Vec2::ZERO);
+        let mut full = Fx::new(Motion::Full);
+        full.shake.add(1.0);
+        full.update(0.03);
+        assert_ne!(full.shake_offset(), Vec2::ZERO);
     }
 
     #[test]

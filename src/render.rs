@@ -202,7 +202,11 @@ impl View {
                 self.rect(x + 2.0, y + 2.0, size - 4.0, (size - 4.0) * 0.22, shade(c, 1.25));
             }
             BlockStyle::Flat => {
-                self.rect(x + edge * 0.5, y + edge * 0.5, size - edge, size - edge, c);
+                // A modern flat tile: inset, with a darker lip along the bottom.
+                let m = edge * 1.6;
+                let (w, h) = (size - 2.0 * m, size - 2.0 * m);
+                self.rect(x + m, y + m, w, h, shade(c, 0.7));
+                self.rect(x + m, y + m, w, h * 0.8, c);
             }
             BlockStyle::Outline => {
                 let t = (size / 11.0).max(1.0);
@@ -221,15 +225,23 @@ impl View {
                 self.circle(x + m + w * 0.26, y + m + h * 0.23, size * 0.06, with_alpha(WHITE, 0.75 * a));
             }
             BlockStyle::Pixel => {
+                // An 8-bit brick: black outline, flat colour, a checker dither shading the
+                // lower right, and a white highlight in the corner, all in whole "pixels".
                 let p = (size / 8.0).round().max(1.0);
-                self.rect(x, y, size, size, shade(c, 0.35));
+                let n = (size / p) as i32;
+                self.rect(x, y, size, size, with_alpha(BLACK, a));
                 self.rect(x + p, y + p, size - 2.0 * p, size - 2.0 * p, c);
-                // Light top-left, dark bottom-right, in whole "pixels".
-                self.rect(x + p, y + p, size - 2.0 * p, p, lift(0.45));
-                self.rect(x + p, y + 2.0 * p, p, size - 3.0 * p, lift(0.45));
-                self.rect(x + p, y + size - 2.0 * p, size - 2.0 * p, p, shade(c, 0.62));
-                self.rect(x + size - 2.0 * p, y + 2.0 * p, p, size - 4.0 * p, shade(c, 0.62));
-                self.rect(x + 2.0 * p, y + 2.0 * p, p, p, with_alpha(WHITE, a));
+                let dark = with_alpha(shade(c, 0.45), a);
+                for py in 1..n - 1 {
+                    for px in 1..n - 1 {
+                        if px + py > n && (px + py) % 2 == 0 {
+                            self.rect(x + px as f32 * p, y + py as f32 * p, p, p, dark);
+                        }
+                    }
+                }
+                let white = with_alpha(WHITE, a);
+                self.rect(x + p, y + p, 2.0 * p, p, white);
+                self.rect(x + p, y + 2.0 * p, p, p, white);
             }
             BlockStyle::Neon => {
                 let t = (size / 10.0).max(1.0);
@@ -314,6 +326,223 @@ impl View {
                 self.rect(gx, gy, g, g, with_alpha(c, 0.12));
                 self.outline(gx, gy, g, g, t, with_alpha(c, 0.5));
             }
+        }
+    }
+}
+
+/// A field (frame, background, grid and decoration) in board `theme`, `rows` cells high
+/// from (x, y), cells `cell` wide. `frame` overrides the frame colour (clear flashes,
+/// danger). Every theme has its own construction, not just its own colours, and all of it
+/// is still and faint enough to keep the stack readable.
+fn draw_board_theme(v: &View, theme: skins::BoardTheme, x: f32, y: f32, cell: f32, rows: usize, frame: Option<Color>) {
+    use skins::BoardTheme as T;
+    let c = theme.colors();
+    let (w, h) = (WIDTH as f32 * cell, rows as f32 * cell);
+    let frame = frame.unwrap_or(hex(c.frame));
+    let field = hex(c.field);
+    let grid = hex(c.grid);
+    let k = cell / CELL; // decoration scale (preview vs game)
+    // Vertical gradient in bands.
+    let gradient = |top: Color, bottom: Color| {
+        const BANDS: usize = 24;
+        for i in 0..BANDS {
+            let t = i as f32 / (BANDS - 1) as f32;
+            v.rect(x, y + h * i as f32 / BANDS as f32, w, h / BANDS as f32 + 0.5, mix_colors(top, bottom, t));
+        }
+    };
+    let grid_lines = |col: Color, vertical: bool, horizontal: bool| {
+        if vertical {
+            for gx in 1..WIDTH {
+                v.rect(x + gx as f32 * cell, y, 1.0, h, col);
+            }
+        }
+        if horizontal {
+            for gy in 1..rows {
+                v.rect(x, y + gy as f32 * cell, w, 1.0, col);
+            }
+        }
+    };
+    let dots = |col: Color, r: f32| {
+        for gx in 1..WIDTH {
+            for gy in 1..rows {
+                v.circle(x + gx as f32 * cell, y + gy as f32 * cell, r, col);
+            }
+        }
+    };
+    match theme {
+        T::Midnight => {
+            v.rect(x - 4.0 * k, y - 4.0 * k, w + 8.0 * k, h + 8.0 * k, frame);
+            v.rect(x, y, w, h, field);
+            grid_lines(grid, true, true);
+        }
+        T::Paper => {
+            // A notebook page on a dark desk: soft shadow, a card frame, ruled lines and a
+            // red margin, no vertical grid.
+            v.rect(x - 6.0 * k + 8.0 * k, y - 6.0 * k + 10.0 * k, w + 12.0 * k, h + 12.0 * k, Color::new(0.0, 0.0, 0.0, 0.45));
+            v.rect(x - 6.0 * k, y - 6.0 * k, w + 12.0 * k, h + 12.0 * k, frame);
+            v.rect(x - 3.0 * k, y - 3.0 * k, w + 6.0 * k, h + 6.0 * k, mix_colors(frame, WHITE, 0.25));
+            v.rect(x, y, w, h, field);
+            for gy in 1..rows {
+                v.rect(x, y + gy as f32 * cell, w, 1.5 * k.max(0.7), Color::new(0.45, 0.6, 0.85, 0.45));
+            }
+            v.rect(x + 0.35 * cell, y, 1.5 * k.max(0.7), h, Color::new(0.9, 0.3, 0.3, 0.55));
+            // Punched holes down the left edge.
+            for i in 0..(rows / 4).max(1) {
+                v.circle(x - 3.0 * k, y + (i as f32 * 4.0 + 2.0) * cell, 3.5 * k, hex(c.backdrop));
+            }
+        }
+        T::Sakura => {
+            // Rounded double frame in blossom pink, a dot grid, scattered petals.
+            v.rounded(x - 7.0 * k, y - 7.0 * k, w + 14.0 * k, h + 14.0 * k, 10.0 * k, frame);
+            v.rounded(x - 5.0 * k, y - 5.0 * k, w + 10.0 * k, h + 10.0 * k, 8.0 * k, hex(c.backdrop));
+            v.rounded(x - 3.0 * k, y - 3.0 * k, w + 6.0 * k, h + 6.0 * k, 6.0 * k, with_alpha(frame, 0.7));
+            v.rect(x, y, w, h, field);
+            dots(with_alpha(frame, 0.35), 1.6 * k);
+            for i in 0..(14.0 * rows as f32 / 20.0) as usize {
+                let px = x + hash01(i, 1, 31) * w;
+                let py = y + hash01(i, 2, 31) * h;
+                let r = (2.5 + 2.5 * hash01(i, 3, 31)) * k;
+                for p in 0..5 {
+                    let a = p as f32 / 5.0 * std::f32::consts::TAU + hash01(i, 4, 31) * 6.0;
+                    v.circle(px + a.cos() * r, py + a.sin() * r, r * 0.75, Color::new(1.0, 0.72, 0.84, 0.10));
+                }
+                v.circle(px, py, r * 0.4, Color::new(1.0, 0.9, 0.6, 0.12));
+            }
+        }
+        T::Terminal => {
+            // A CRT console: scanlines, a dotted grid and bright bracket corners.
+            v.rect(x - 3.0 * k, y - 3.0 * k, w + 6.0 * k, h + 6.0 * k, with_alpha(frame, 0.35));
+            v.rect(x, y, w, h, field);
+            let mut sy = y;
+            while sy < y + h {
+                v.rect(x, sy, w, 1.0, Color::new(0.2, 1.0, 0.4, 0.045));
+                sy += 3.0 * k.max(0.6);
+            }
+            for gx in 1..WIDTH {
+                for gy in 0..rows * 4 {
+                    v.rect(x + gx as f32 * cell, y + gy as f32 * cell / 4.0, 1.0, 1.0, with_alpha(grid, 0.9));
+                }
+            }
+            let (l, t) = (18.0 * k, 3.0 * k);
+            for (cx, cy, sx, sy) in [(x - 6.0 * k, y - 6.0 * k, 1.0, 1.0), (x + w + 6.0 * k, y - 6.0 * k, -1.0, 1.0), (x - 6.0 * k, y + h + 6.0 * k, 1.0, -1.0), (x + w + 6.0 * k, y + h + 6.0 * k, -1.0, -1.0)] {
+                let hx = if sx > 0.0 { cx } else { cx - l };
+                let vy = if sy > 0.0 { cy } else { cy - l };
+                v.rect(hx, if sy > 0.0 { cy } else { cy - t }, l, t, frame);
+                v.rect(if sx > 0.0 { cx } else { cx - t }, vy, t, l, frame);
+            }
+            v.text(">_", x + 6.0 * k, y + h - 8.0 * k, 16.0 * k, Color::new(0.3, 1.0, 0.5, 0.25));
+        }
+        T::Burrow => {
+            // Packed earth inside a frame of rough wooden planks; pebbles and roots, no grid.
+            let plank = 9.0 * k;
+            let woods = [hex(0x6b4a2e), hex(0x7d5836), hex(0x5a3d25)];
+            let mut i = 0;
+            let mut px = x - plank;
+            while px < x + w + plank {
+                let pw = (20.0 + 14.0 * hash01(i, 0, 41)) * k;
+                v.rect(px, y - plank, pw.min(x + w + plank - px), plank, woods[i % 3]);
+                v.rect(px, y + h, pw.min(x + w + plank - px), plank, woods[(i + 1) % 3]);
+                px += pw;
+                i += 1;
+            }
+            let mut py = y;
+            while py < y + h {
+                let ph = (26.0 + 18.0 * hash01(i, 1, 41)) * k;
+                v.rect(x - plank, py, plank, ph.min(y + h - py), woods[i % 3]);
+                v.rect(x + w, py, plank, ph.min(y + h - py), woods[(i + 2) % 3]);
+                py += ph;
+                i += 1;
+            }
+            gradient(field, mix_colors(field, BLACK, 0.35));
+            for i in 0..(70.0 * rows as f32 / 20.0) as usize {
+                let sx = x + hash01(i, 5, 43) * w;
+                let sy = y + hash01(i, 6, 43) * h;
+                let r = (1.0 + 2.5 * hash01(i, 7, 43)) * k;
+                let col = if i % 3 == 0 { Color::new(0.75, 0.6, 0.4, 0.14) } else { Color::new(0.0, 0.0, 0.0, 0.18) };
+                v.circle(sx, sy, r, col);
+            }
+        }
+        T::Jade => {
+            // Polished jade in a gold double frame, with pale veins through the stone.
+            let gold = hex(0xd4af37);
+            v.rect(x - 7.0 * k, y - 7.0 * k, w + 14.0 * k, h + 14.0 * k, frame);
+            v.rect(x - 5.0 * k, y - 5.0 * k, w + 10.0 * k, h + 10.0 * k, gold);
+            v.rect(x - 3.0 * k, y - 3.0 * k, w + 6.0 * k, h + 6.0 * k, mix_colors(gold, BLACK, 0.55));
+            v.rect(x - 1.5 * k, y - 1.5 * k, w + 3.0 * k, h + 3.0 * k, gold);
+            v.rect(x, y, w, h, field);
+            for vein in 0..6 {
+                let mut p = vec2(x + hash01(vein, 0, 53) * w, y);
+                let step = 10.0 * k;
+                while p.y < y + h {
+                    let q = vec2((p.x + (hash01(vein, (p.y / step) as usize, 54) - 0.45) * 14.0 * k).clamp(x, x + w), p.y + step);
+                    v.triangle(p, q, q + vec2(1.4 * k, 0.0), Color::new(0.7, 1.0, 0.85, 0.09));
+                    p = q;
+                }
+            }
+            grid_lines(with_alpha(grid, 0.6), true, true);
+        }
+        T::Glacier => {
+            // Ice: light at the top fading into deep blue, frost crystals, icicles on the frame.
+            let ice = hex(0xbfe8ff);
+            v.rect(x - 3.0 * k, y - 3.0 * k, w + 6.0 * k, h + 6.0 * k, frame);
+            gradient(mix_colors(field, ice, 0.22), mix_colors(field, BLACK, 0.3));
+            grid_lines(with_alpha(grid, 0.8), true, true);
+            for i in 0..(10.0 * rows as f32 / 20.0) as usize {
+                let cx = x + hash01(i, 1, 61) * w;
+                let cy = y + hash01(i, 2, 61).powi(2) * h * 0.6;
+                let r = (3.0 + 5.0 * hash01(i, 3, 61)) * k;
+                for a in 0..3 {
+                    let ang = a as f32 * std::f32::consts::PI / 3.0;
+                    let d = vec2(ang.cos(), ang.sin()) * r;
+                    let n = vec2(-d.y, d.x).normalize_or_zero() * 0.6 * k;
+                    v.triangle(vec2(cx, cy) - d - n, vec2(cx, cy) + d - n, vec2(cx, cy) + d + n, Color::new(0.85, 0.95, 1.0, 0.16));
+                }
+            }
+            for i in 0..9 {
+                let ix = x + (i as f32 + 0.5) / 9.0 * w;
+                let len = (6.0 + 12.0 * hash01(i, 9, 62)) * k;
+                v.triangle(vec2(ix - 4.0 * k, y - 3.0 * k), vec2(ix + 4.0 * k, y - 3.0 * k), vec2(ix, y - 3.0 * k + len), with_alpha(ice, 0.55));
+            }
+        }
+        T::Sunset => {
+            // Synthwave: a dusk gradient, a striped sun low on the horizon, a two-tone frame.
+            v.rect(x - 6.0 * k, y - 6.0 * k, w + 12.0 * k, h + 12.0 * k, hex(0xff7a45));
+            v.rect(x - 3.0 * k, y - 3.0 * k, w + 6.0 * k, h + 6.0 * k, hex(0xc0306b));
+            if frame != hex(c.frame) {
+                v.rect(x - 6.0 * k, y - 6.0 * k, w + 12.0 * k, 3.0 * k, frame);
+            }
+            gradient(hex(0x1c0b2e), hex(0x4a1630));
+            let (sx, sy, r) = (x + w / 2.0, y + h * 0.78, w * 0.36);
+            v.circle(sx, sy, r, Color::new(1.0, 0.45, 0.35, 0.18));
+            v.circle(sx, sy, r * 0.82, Color::new(1.0, 0.75, 0.3, 0.14));
+            for i in 0..6 {
+                let by = sy - r * 0.1 + i as f32 * r * 0.16;
+                v.rect(sx - r, by, 2.0 * r, (2.0 + i as f32 * 1.2) * k, mix_colors(hex(0x1c0b2e), hex(0x4a1630), (by - y) / h));
+            }
+            for gx in 1..WIDTH {
+                v.rect(x + gx as f32 * cell, y + h * 0.82, 1.0, h * 0.18, Color::new(1.0, 0.4, 0.7, 0.22));
+            }
+            v.rect(x, y + h * 0.82, w, 1.0, Color::new(1.0, 0.5, 0.75, 0.4));
+            grid_lines(Color::new(1.0, 0.5, 0.8, 0.06), true, true);
+        }
+        T::Inferno => {
+            // Hellfire: a heavy scorched frame with a glowing inner edge, embers rising from a
+            // lava glow at the bottom, flames along the floor and cracks of light.
+            v.rect(x - 8.0 * k, y - 8.0 * k, w + 16.0 * k, h + 16.0 * k, hex(0x2a0805));
+            v.rect(x - 4.0 * k, y - 4.0 * k, w + 8.0 * k, h + 8.0 * k, frame);
+            v.rect(x - 2.0 * k, y - 2.0 * k, w + 4.0 * k, h + 4.0 * k, hex(0xffb347));
+            gradient(hex(0x0a0202), hex(0x3a0a05));
+            v.rect(x, y + h * 0.85, w, h * 0.15, Color::new(1.0, 0.35, 0.05, 0.14));
+            for i in 0..12 {
+                let fx = x + (i as f32 + 0.5) / 12.0 * w;
+                let fh = (20.0 + 46.0 * hash01(i, 1, 71)) * k;
+                let fw = (10.0 + 8.0 * hash01(i, 2, 71)) * k;
+                v.triangle(vec2(fx - fw, y + h), vec2(fx + fw, y + h), vec2(fx + (hash01(i, 3, 71) - 0.5) * 8.0 * k, y + h - fh), Color::new(1.0, 0.4, 0.05, 0.16));
+            }
+            for i in 0..(18.0 * rows as f32 / 20.0) as usize {
+                v.circle(x + hash01(i, 4, 72) * w, y + h * (0.3 + 0.7 * hash01(i, 5, 72)), (1.0 + 1.5 * hash01(i, 6, 72)) * k, Color::new(1.0, 0.6, 0.2, 0.22));
+            }
+            grid_lines(with_alpha(grid, 0.55), true, true);
         }
     }
 }
@@ -415,15 +644,9 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
             v.rect(BOARD_X - i, BOARD_Y - i, BOARD_W + 2.0 * i, BOARD_H + 2.0 * i, with_alpha(red, a * danger * (0.4 + 0.6 * pulse)));
         }
     }
-    v.rect(BOARD_X - 4.0, BOARD_Y - 4.0, BOARD_W + 8.0, BOARD_H + 8.0, frame);
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, mix_colors(field_bg, red, 0.12 * danger * (0.5 + 0.5 * pulse)));
-    let grid = hex(theme.grid);
-    for x in 1..WIDTH {
-        v.rect(BOARD_X + x as f32 * CELL, BOARD_Y, 1.0, BOARD_H, grid);
-    }
-    for y in 1..VISIBLE_ROWS {
-        v.rect(BOARD_X, BOARD_Y + y as f32 * CELL, BOARD_W, 1.0, grid);
-    }
+    let _ = field_bg;
+    draw_board_theme(&v, skins::current().theme, BOARD_X, BOARD_Y, CELL, VISIBLE_ROWS, Some(frame));
+    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, with_alpha(red, 0.12 * danger * (0.5 + 0.5 * pulse)));
 
     // Settled stack, offset while it collapses after a clear. During a hard drop's
     // flight, show the field as it was before the lock.
@@ -1536,15 +1759,8 @@ fn preview_cell(ch: char) -> Option<Cell> {
 /// A small still field in the current skin: a stack, a falling piece and its ghost, and a queue.
 fn draw_skin_preview(v: &View, x: f32, y: f32) {
     let t = theme();
-    let (bw, bh) = (WIDTH as f32 * PREVIEW_CELL, PREVIEW_ROWS as f32 * PREVIEW_CELL);
-    v.rect(x - 3.0, y - 3.0, bw + 6.0, bh + 6.0, hex(t.frame));
-    v.rect(x, y, bw, bh, hex(t.field));
-    for c in 1..WIDTH {
-        v.rect(x + c as f32 * PREVIEW_CELL, y, 1.0, bh, hex(t.grid));
-    }
-    for r in 1..PREVIEW_ROWS {
-        v.rect(x, y + r as f32 * PREVIEW_CELL, bw, 1.0, hex(t.grid));
-    }
+    let bw = WIDTH as f32 * PREVIEW_CELL;
+    draw_board_theme(v, skins::current().theme, x, y, PREVIEW_CELL, PREVIEW_ROWS, None);
     let at = |cx: i32, row_from_top: i32| (x + cx as f32 * PREVIEW_CELL, y + row_from_top as f32 * PREVIEW_CELL);
     for (i, row) in PREVIEW_STACK.iter().enumerate() {
         let r = PREVIEW_ROWS as i32 - 1 - i as i32;
