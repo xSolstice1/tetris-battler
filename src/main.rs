@@ -19,6 +19,7 @@ mod settings;
 mod settings_ui;
 mod save;
 mod skins;
+mod ui;
 mod stats;
 mod versus;
 

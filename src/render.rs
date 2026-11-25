@@ -17,6 +17,7 @@ use crate::versus::{Phase as VsPhase, Versus};
 use crate::progress::{self, Progress, Reward};
 use crate::scene::{self, Scene, Theme};
 use crate::skins::{self, BlockStyle, Item, ThemeColors};
+use crate::ui;
 
 /// Virtual canvas width for Classic and the menu; Battler adds the monster panel.
 const CLASSIC_W: f32 = 760.0;
@@ -136,7 +137,7 @@ impl View {
     }
 
     /// Text that may mix ASCII (the game's font) and Chinese (a small embedded subset).
-    fn text_mixed(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
+    pub(crate) fn text_mixed(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
         let px = (size * s).max(1.0) as u16;
         let mut cx = self.ox + x * s;
@@ -148,17 +149,13 @@ impl View {
     }
 
     /// Width of `text_mixed` in virtual units.
-    fn measure_mixed(&self, t: &str, size: f32) -> f32 {
+    pub(crate) fn measure_mixed(&self, t: &str, size: f32) -> f32 {
         let s = self.scale;
         let px = (size * s).max(1.0) as u16;
         runs(t).map(|(run, cjk)| measure_text(run, if cjk { cjk_font() } else { None }.as_ref(), px, 1.0).width).sum::<f32>() / s
     }
 
-    fn text_mixed_centered(&self, t: &str, cx: f32, y: f32, size: f32, c: Color) {
-        self.text_mixed(t, cx - self.measure_mixed(t, size) / 2.0, y, size, c);
-    }
-
-    fn text_mixed_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
+    pub(crate) fn text_mixed_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
         self.text_mixed(t, right - self.measure_mixed(t, size), y, size, c);
     }
 
@@ -612,12 +609,15 @@ fn draw_piece_sized(v: &View, kind: PieceKind, cx: f32, cy: f32, mini: f32, colo
     }
 }
 
+/// A side panel in the board theme's colours, under a section header.
 fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
-    v.text(label, x, y - 8.0, 22.0, hex(0x9aa3b8));
+    ui::section(v, x, y - 10.0, w, label, hex(ui::TEXT2));
     let t = theme();
-    v.rect(x, y, w, h, hex(t.panel));
-    v.outline(x, y, w, h, 2.0, hex(t.panel_line));
+    ui::panel(v, Rect::new(x, y, w, h), &ui::Panel::themed(t.panel, t.panel_line));
 }
+
+/// Height of a row in the score / lines / level card.
+const STAT_ROW_H: f32 = 68.0;
 
 /// A play session. `reward` is what the finished run earned (shown on the results).
 pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, music_on: bool, opts: &Settings, battle: Option<&Battle>, versus: Option<&Versus>, reward: Option<&Reward>) {
@@ -726,8 +726,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
     }
 
     // Title + hold + stats on the left.
-    v.text("BLOCK", LEFT_X, 40.0, 34.0, hex(0xffd23f));
-    v.text("BRAWL", LEFT_X + 88.0, 40.0, 34.0, hex(0xff4f6d));
+    ui::text_shadow(&v, "BLOCK", LEFT_X, 40.0, 34.0, hex(ui::GOLD));
+    ui::text_shadow(&v, "BRAWL", LEFT_X + 88.0, 40.0, 34.0, hex(ui::PINK));
 
     panel(&v, "HOLD", LEFT_X, BOARD_Y, PANEL_W, 100.0);
     if let Some(kind) = game.hold {
@@ -735,17 +735,24 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
         draw_mini_piece(&v, kind, LEFT_X + PANEL_W / 2.0, BOARD_Y + 50.0, c);
     }
 
-    // Score and lines tick up (scene effects), brighter while they're counting.
-    let counting = if scene.ticking(game) { mix_colors(WHITE, hex(0xffd23f), 0.45) } else { WHITE };
-    let stats = [
-        ("SCORE", scene.score().to_string(), counting),
-        ("LINES", scene.lines().to_string(), WHITE),
-        ("LEVEL", game.level.to_string(), WHITE),
-    ];
-    for (i, (label, value, color)) in stats.iter().enumerate() {
-        let y = BOARD_Y + 160.0 + i as f32 * 70.0;
-        v.text(label, LEFT_X, y, 22.0, hex(0x9aa3b8));
-        v.text(value, LEFT_X, y + 32.0, 34.0, *color);
+    // Score, lines and level in one card; score and lines tick up (scene effects),
+    // brighter while they're counting.
+    let counting = if scene.ticking(game) { mix_colors(WHITE, hex(ui::GOLD), 0.45) } else { WHITE };
+    let card = Rect::new(LEFT_X, BOARD_Y + 118.0, PANEL_W, 3.0 * STAT_ROW_H);
+    let t = theme;
+    ui::panel(&v, card, &ui::Panel::themed(t.panel, t.panel_line));
+    for (i, label) in ["SCORE", "LINES", "LEVEL"].iter().enumerate() {
+        let y = card.y + i as f32 * STAT_ROW_H;
+        if i > 0 {
+            ui::rule(&v, card.x + 10.0, y, card.w - 20.0, Color::new(1.0, 1.0, 1.0, 0.08));
+        }
+        ui::caps(&v, label, card.x + 12.0, y + 22.0, ui::CAPS, hex(ui::TEXT2), 2.0);
+    }
+    let values = [scene.score().to_string(), scene.lines().to_string(), game.level.to_string()];
+    for (i, value) in values.iter().enumerate() {
+        let y = card.y + i as f32 * STAT_ROW_H;
+        let color = if i == 0 { counting } else { WHITE };
+        ui::text_shadow_right(&v, value, card.right() - 12.0, y + 56.0, ui::NUM + 4.0, color);
     }
 
     // Live performance stats.
@@ -758,17 +765,31 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
         ("VS", stats::fmt_rate(s.vs(), 1)),
         ("KPP", stats::fmt_rate(s.kpp(), 2)),
     ];
-    stat_rows(&v, LEFT_X, LEFT_X + PANEL_W, BOARD_Y + 370.0, &live, 28.0, 20.0);
+    let table = Rect::new(LEFT_X, BOARD_Y + 352.0, PANEL_W, live.len() as f32 * 25.0 + 12.0);
+    ui::section(&v, LEFT_X, table.y - 10.0, PANEL_W, "LIVE", hex(ui::TEXT2));
+    ui::panel(&v, table, &ui::Panel::themed(t.panel, t.panel_line));
+    for (i, (label, value)) in live.iter().enumerate() {
+        let y = table.y + 6.0 + i as f32 * 25.0;
+        if i % 2 == 1 {
+            v.rect(table.x + 4.0, y, table.w - 8.0, 25.0, Color::new(1.0, 1.0, 1.0, 0.025));
+        }
+        ui::caps(&v, label, table.x + 12.0, ui::baseline(y + 12.5, 13.0), 13.0, hex(ui::TEXT2), 1.5);
+        v.text_right(value, table.right() - 12.0, ui::baseline(y + 12.5, 19.0), 19.0, WHITE);
+    }
 
-    let motion_y = BOARD_Y + 570.0;
-    v.text("M  motion:", LEFT_X, motion_y, 18.0, hex(0x5d6680));
-    v.text(fx.effects().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
-    v.text("E  scene:", LEFT_X, motion_y + 22.0, 18.0, hex(0x5d6680));
-    v.text(if scene.on() { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 22.0, 18.0, hex(0x9aa3b8));
-    v.text("N  sound:", LEFT_X, motion_y + 44.0, 18.0, hex(0x5d6680));
-    v.text(if sound_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 44.0, 18.0, hex(0x9aa3b8));
-    v.text("J  music:", LEFT_X, motion_y + 66.0, 18.0, hex(0x5d6680));
-    v.text(if music_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 66.0, 18.0, hex(0x9aa3b8));
+    // Quick toggles, as keys.
+    let legend = [
+        ("M", "motion", fx.effects().label(), true),
+        ("E", "scene", if scene.on() { "on" } else { "off" }, scene.on()),
+        ("N", "sound", if sound_on { "on" } else { "off" }, sound_on),
+        ("J", "music", if music_on { "on" } else { "off" }, music_on),
+    ];
+    for (i, (key, what, value, on)) in legend.iter().enumerate() {
+        let cy = BOARD_Y + 554.0 + i as f32 * 24.0;
+        let kw = ui::keycap(&v, LEFT_X, cy, key, 13.0);
+        v.text(what, LEFT_X + kw + 7.0, ui::baseline(cy, 15.0), 15.0, hex(ui::TEXT3));
+        v.text_right(value, LEFT_X + PANEL_W, ui::baseline(cy, 15.0), 15.0, if *on { hex(ui::TEXT2) } else { hex(ui::TEXT4) });
+    }
 
     // Next queue on the right.
     let slot = 80.0;
@@ -801,15 +822,12 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
         draw_battle_panel(&v, b, scene_still);
         if let Phase::Intermission { .. } = b.phase {
             let next = battle::monster(b.monster.tier + 1);
-            v.rect(BOARD_X, BOARD_Y + 250.0, BOARD_W, 120.0, Color::new(0.0, 0.0, 0.0, 0.6));
-            v.text_centered("DEFEATED!", BOARD_X + BOARD_W / 2.0, BOARD_Y + 305.0, 48.0, hex(0xffd23f));
-            v.text_centered(
-                &format!("next: {}", next.title()),
-                BOARD_X + BOARD_W / 2.0,
-                BOARD_Y + 345.0,
-                22.0,
-                hex(0x9aa3b8),
-            );
+            let band = Rect::new(BOARD_X + 16.0, BOARD_Y + 252.0, BOARD_W - 32.0, 116.0);
+            ui::panel(&v, band, &ui::Panel::card().radius(14.0).tint(hex(ui::GOLD), 0.06));
+            ui::radial(&v, band.center().x, BOARD_Y + 290.0, 140.0, 36.0, with_alpha(hex(ui::GOLD), 0.18), with_alpha(hex(ui::GOLD), 0.0));
+            ui::text_shadow_centered(&v, "DEFEATED!", BOARD_X + BOARD_W / 2.0, BOARD_Y + 308.0, 48.0, hex(ui::GOLD));
+            ui::caps_centered(&v, "NEXT UP", BOARD_X + BOARD_W / 2.0, BOARD_Y + 334.0, 12.0, hex(ui::TEXT3), 2.5);
+            v.text_centered(&next.title(), BOARD_X + BOARD_W / 2.0, BOARD_Y + 356.0, 20.0, hex(next.color));
         }
     }
 
@@ -844,11 +862,9 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
 const PANEL_X: f32 = RIGHT_X + PANEL_W + 30.0;
 const MONSTER_PANEL_W: f32 = 320.0;
 
-/// Horizontal bar: background, fill fraction, border.
+/// Horizontal bar in the UI kit: a rounded groove and a gradient fill.
 fn bar(v: &View, x: f32, y: f32, w: f32, h: f32, frac: f32, fill: Color) {
-    v.rect(x, y, w, h, hex(0x10131c));
-    v.rect(x, y, w * frac.clamp(0.0, 1.0), h, fill);
-    v.outline(x, y, w, h, 2.0, hex(0x262c3d));
+    ui::progress(v, Rect::new(x, y, w, h), frac, &ui::Bar::new(mix_colors(fill, BLACK, 0.25), mix_colors(fill, WHITE, 0.15)));
 }
 
 /// Seconds before a monster attack during which it visibly winds up.
@@ -1009,141 +1025,172 @@ fn draw_battle_panel(v: &View, b: &Battle, still: bool) {
     let (x, w) = (PANEL_X, MONSTER_PANEL_W);
     let cx = x + w / 2.0;
     let m = &b.monster;
-    let muted = hex(0x9aa3b8);
+    let muted = hex(ui::TEXT2);
+    let accent = hex(m.color);
 
-    v.text(&format!("MONSTER {}", m.tier), x, BOARD_Y - 8.0, 22.0, muted);
-    // Backdrop tinted toward the monster's colour, deepest at the floor.
-    const BANDS: usize = 40;
-    let band_h = 300.0 / BANDS as f32;
-    for i in 0..BANDS {
-        let k = i as f32 / (BANDS - 1) as f32;
-        let c = mix_colors(hex(0x141824), hex(m.color), 0.02 + 0.10 * k * k);
-        v.rect(x, BOARD_Y + i as f32 * band_h, w, band_h + 0.5, c);
-    }
+    ui::section(v, x, BOARD_Y - 10.0, w, &format!("MONSTER {}", m.tier), muted);
+    // The stage: tinted toward the monster's colour, deepest at the floor.
+    let stage = Rect::new(x, BOARD_Y, w, 300.0);
     let feet_y = BOARD_Y + 238.0;
-    v.rect(x + 20.0, feet_y + 8.0, w - 40.0, 2.0, with_alpha(hex(m.color), 0.15));
-    v.outline(x, BOARD_Y, w, 300.0, 2.0, hex(0x262c3d));
-    v.text_centered(&m.title(), cx, BOARD_Y + 40.0, 34.0, hex(m.color));
+    ui::shadow(v, stage, 12.0, 14.0, 5.0, 0.45);
+    ui::fill(v, stage, 12.0, mix_colors(hex(0x161b28), accent, 0.03), mix_colors(hex(0x141824), accent, 0.14));
+    ui::radial(v, cx, feet_y + 8.0, 140.0, 30.0, with_alpha(accent, 0.12), with_alpha(accent, 0.0));
+    ui::rule(v, x + 20.0, feet_y + 8.0, w - 40.0, with_alpha(accent, 0.3));
+    ui::stroke(v, stage, 12.0, 1.0, with_alpha(accent, 0.22));
+    ui::shine(v, stage, 12.0, 0.1);
+    ui::text_shadow_centered(v, &m.title(), cx, BOARD_Y + 42.0, 34.0, accent);
     draw_monster(v, b, cx, feet_y, still);
     if let Some(ability) = m.ability {
         let active = b.ability_in_effect();
         let pulse = if still { 1.0 } else { 0.6 + 0.4 * (get_time() as f32 * 8.0).sin().abs() };
-        let color = if active { with_alpha(hex(0xff4f6d), pulse) } else { hex(0x7fd8ff) };
         let label = if active { format!("{}!", ability.name()) } else { ability.name().to_owned() };
-        v.text_centered(&label, cx, BOARD_Y + 262.0, 24.0, color);
-        v.text_centered(ability.description(), cx, BOARD_Y + 286.0, 18.0, hex(0x5d6680));
+        if active {
+            ui::pill_centered(v, cx, BOARD_Y + 262.0, &label.to_uppercase(), 13.0, with_alpha(hex(ui::PINK), pulse), ui::Pill::Solid);
+        } else {
+            ui::pill_centered(v, cx, BOARD_Y + 262.0, &label.to_uppercase(), 13.0, hex(ui::CYAN), ui::Pill::Soft);
+        }
+        v.text_centered(ability.description(), cx, BOARD_Y + 290.0, 16.0, hex(ui::TEXT3));
     }
 
-    // HP.
-    let hp_y = BOARD_Y + 320.0;
-    v.text("HP", x, hp_y + 18.0, 22.0, muted);
-    bar(v, x + 44.0, hp_y, w - 44.0, 24.0, b.hp as f32 / m.max_hp as f32, hex(0x5cdb5c));
-    v.text_centered(&format!("{} / {}", b.hp, m.max_hp), x + 44.0 + (w - 44.0) / 2.0, hp_y + 18.0, 20.0, WHITE);
+    // HP, the clock, the next attack and the tallies in one card.
+    let card = Rect::new(x, BOARD_Y + 314.0, w, 266.0);
+    ui::panel(v, card, &ui::Panel::card());
+    let (l, r) = (card.x + 16.0, card.right() - 16.0);
+
+    let hp_y = card.y + 18.0;
+    ui::caps(v, "HP", l, ui::baseline(hp_y + 11.0, ui::CAPS), ui::CAPS, muted, 2.0);
+    let hp = Rect::new(l + 40.0, hp_y, r - l - 40.0, 22.0);
+    ui::progress(v, hp, b.hp as f32 / m.max_hp as f32, &ui::Bar::new(hex(0x2fae55), hex(0x8dff8f)).glow(0.4));
+    ui::text_shadow_centered(v, &format!("{} / {}", b.hp, m.max_hp), hp.center().x, ui::baseline(hp.center().y, 18.0), 18.0, WHITE);
     if b.shield > 0 {
         let frac = b.shield as f32 / m.max_hp as f32;
-        bar(v, x + 44.0, hp_y + 30.0, w - 44.0, 10.0, frac, hex(0x4f8bff));
-        v.text(&format!("shield {}", b.shield), x + 44.0, hp_y + 58.0, 18.0, hex(0x4f8bff));
+        ui::progress(v, Rect::new(hp.x, hp.bottom() + 6.0, hp.w, 8.0), frac, &ui::Bar::new(hex(0x2f5fd0), hex(0x8fb8ff)).glow(0.3));
+        ui::caps_right(v, &format!("SHIELD {}", b.shield), r, hp.bottom() + 30.0, 12.0, hex(ui::BLUE), 1.5);
     }
 
     // Time left.
-    let time_y = hp_y + 80.0;
+    let time_y = card.y + 92.0;
     let secs = b.time_left.ceil() as u32;
     let urgent = b.time_left < 10.0 && b.phase == Phase::Fighting;
     let pulse = if urgent && !still { 0.6 + 0.4 * (get_time() as f32 * 10.0).sin().abs() } else { 1.0 };
-    let time_color = if urgent { with_alpha(hex(0xff4f6d), pulse) } else { WHITE };
-    v.text("TIME", x, time_y, 22.0, muted);
-    v.text(&format!("{}:{:02}", secs / 60, secs % 60), x + 70.0, time_y + 4.0, 44.0, time_color);
+    let time_color = if urgent { with_alpha(hex(ui::PINK), pulse) } else { WHITE };
+    ui::caps(v, "TIME", l, time_y, ui::CAPS, muted, 2.0);
+    ui::text_shadow_right(v, &format!("{}:{:02}", secs / 60, secs % 60), r, time_y + 6.0, 44.0, time_color);
 
     // Next garbage attack.
-    let atk_y = time_y + 40.0;
-    v.text("ATTACK", x, atk_y + 18.0, 22.0, muted);
+    let atk_y = card.y + 118.0;
+    ui::caps(v, "ATTACK", l, ui::baseline(atk_y + 8.0, ui::CAPS), ui::CAPS, muted, 2.0);
     let charge = 1.0 - b.attack_timer / m.attack_every;
     let fighting = b.phase == Phase::Fighting;
-    bar(v, x + 90.0, atk_y, w - 90.0, 24.0, if fighting { charge } else { 0.0 }, hex(0xff9a3c));
-    v.text(
-        &format!(
-            "{} row{} every {:.1}s",
-            m.attack_lines,
-            if m.attack_lines == 1 { "" } else { "s" },
-            m.attack_every
-        ),
-        x,
-        atk_y + 50.0,
-        18.0,
-        hex(0x5d6680),
+    let atk = Rect::new(l + 80.0, atk_y, r - l - 80.0, 16.0);
+    let warn = fighting && b.attack_timer < ATTACK_WARN;
+    ui::progress(v, atk, if fighting { charge } else { 0.0 }, &ui::Bar::new(hex(0xc2541f), hex(0xffb347)).glow(if warn { 1.0 } else { 0.5 }));
+    v.text_right(
+        &format!("{} row{} every {:.1}s", m.attack_lines, if m.attack_lines == 1 { "" } else { "s" }, m.attack_every),
+        r,
+        atk_y + 40.0,
+        16.0,
+        hex(ui::TEXT3),
     );
 
-    let stats_y = atk_y + 100.0;
-    v.text("DEFEATED", x, stats_y, 22.0, muted);
-    v.text(&b.defeated.to_string(), x, stats_y + 32.0, 34.0, WHITE);
-    v.text("DAMAGE", x + 160.0, stats_y, 22.0, muted);
-    v.text(&b.total_damage.to_string(), x + 160.0, stats_y + 32.0, 34.0, WHITE);
+    ui::rule(v, card.x + 12.0, card.y + 176.0, card.w - 24.0, Color::new(1.0, 1.0, 1.0, 0.1));
+    let stats_y = card.y + 204.0;
+    let mid = card.x + card.w / 2.0;
+    v.rect(mid, card.y + 188.0, 1.0, 64.0, Color::new(1.0, 1.0, 1.0, 0.07));
+    ui::caps(v, "DEFEATED", l, stats_y, ui::CAPS, muted, 2.0);
+    ui::text_shadow(v, &b.defeated.to_string(), l, stats_y + 40.0, 36.0, WHITE);
+    ui::caps(v, "DAMAGE", mid + 16.0, stats_y, ui::CAPS, muted, 2.0);
+    ui::text_shadow(v, &b.total_damage.to_string(), mid + 16.0, stats_y + 40.0, 36.0, WHITE);
 }
 
 fn draw_battle_results(v: &View, b: &Battle, stats: &Stats, reward: Option<&Reward>) {
-    let cx = BOARD_X + BOARD_W / 2.0;
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.78));
+    let card = results_card(v, hex(ui::PINK));
+    let cx = card.center().x;
     let title = match b.phase {
         Phase::Over(Defeat::Timeout) => "TIME UP",
         _ => "TOPPED OUT",
     };
-    v.text_centered(title, cx, BOARD_Y + 110.0, 52.0, hex(0xff4f6d));
-    let lines = [
-        ("monsters defeated", b.defeated.to_string()),
-        ("total damage", b.total_damage.to_string()),
-        ("fell to", format!("{} (lv {})", b.monster.title(), b.monster.tier)),
-    ];
-    for (i, (label, value)) in lines.iter().enumerate() {
-        let y = BOARD_Y + 160.0 + i as f32 * 54.0;
-        v.text_centered(label, cx, y, 20.0, hex(0x9aa3b8));
-        v.text_centered(value, cx, y + 28.0, 28.0, WHITE);
+    ui::text_shadow_centered(v, title, cx, BOARD_Y + 84.0, 48.0, hex(ui::PINK));
+    ui::caps_centered(v, "BATTLER", cx, BOARD_Y + 108.0, 13.0, hex(ui::TEXT3), 3.0);
+
+    // The two headline numbers, side by side.
+    let (l, r) = (card.x + 16.0, card.right() - 16.0);
+    let tile_w = (r - l - 10.0) / 2.0;
+    for (i, (label, value)) in [("DEFEATED", b.defeated.to_string()), ("DAMAGE", b.total_damage.to_string())].iter().enumerate() {
+        let t = Rect::new(l + i as f32 * (tile_w + 10.0), BOARD_Y + 124.0, tile_w, 72.0);
+        ui::panel(v, t, &ui::Panel::well());
+        ui::caps_centered(v, label, t.center().x, t.y + 22.0, 13.0, hex(ui::TEXT2), 2.0);
+        ui::text_shadow_centered(v, value, t.center().x, t.y + 60.0, 36.0, if i == 0 { hex(ui::GOLD) } else { WHITE });
     }
+    ui::caps(v, "FELL TO", l, BOARD_Y + 224.0, 13.0, hex(ui::TEXT2), 2.0);
+    let fell = format!("{} (lv {})", b.monster.title(), b.monster.tier);
+    v.text_right(&fell, r, BOARD_Y + 224.0, ui::fit(v, &fell, 19.0, r - l - 80.0), hex(b.monster.color));
+
     let rows = summary_rows(stats);
-    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 340.0, &rows[2..8], 24.0, 18.0);
-    if let Some(r) = reward {
-        draw_reward(v, r, BOARD_Y + 490.0);
+    stat_table(v, l, r, BOARD_Y + 244.0, &rows[2..8], 26.0);
+    if let Some(rw) = reward {
+        draw_reward(v, rw, BOARD_Y + 440.0);
     }
-    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 628.0, 20.0, hex(0x9aa3b8));
+    results_hints(v, card, "retry");
 }
 
 /// XP earned, the level bar, records and new unlocks, in a block starting at `top`
-/// (about 100 tall) across the field.
+/// (up to 142 tall) across the results card.
 fn draw_reward(v: &View, r: &Reward, top: f32) {
-    let cx = BOARD_X + BOARD_W / 2.0;
-    let gold = hex(0xffd23f);
-    let (left, w) = (BOARD_X + 30.0, BOARD_W - 60.0);
-    v.rect(left - 10.0, top - 4.0, w + 20.0, 1.0, hex(0x3d4458));
-    v.text(&format!("+{} XP", r.xp), left, top + 22.0, 24.0, gold);
-    let level = if r.leveled_up() { format!("LEVEL UP!  {}", r.level) } else { format!("LEVEL {}", r.level) };
-    v.text_right(&level, left + w, top + 22.0, 22.0, if r.leveled_up() { gold } else { WHITE });
-    bar(v, left, top + 30.0, w, 8.0, r.into as f32 / r.need.max(1) as f32, gold);
-    let mut y = top + 60.0;
-    if !r.records.is_empty() {
-        v.text_centered(&r.records.join("  ·  "), cx, y, 18.0, hex(0x7fd8ff));
-        y += 24.0;
+    let gold = hex(ui::GOLD);
+    let (left, w) = (BOARD_X + 26.0, BOARD_W - 52.0);
+    let right = left + w;
+    ui::rule(v, left - 6.0, top, w + 12.0, Color::new(1.0, 1.0, 1.0, 0.14));
+
+    // "+120 XP", glowing, and the level it reached.
+    let xp = format!("+{} XP", r.xp);
+    ui::radial(v, left + ui::text_w(v, &xp, 28.0) / 2.0, top + 26.0, 80.0, 20.0, with_alpha(gold, 0.14), with_alpha(gold, 0.0));
+    ui::text_shadow(v, &xp, left, top + 36.0, 28.0, gold);
+    ui::level_badge(v, right - 15.0, top + 25.0, 15.0, r.level, gold);
+    if r.leveled_up() {
+        ui::pill_right(v, right - 38.0, top + 25.0, "LEVEL UP!", 12.0, gold, ui::Pill::Solid);
+    } else {
+        ui::caps_right(v, "LEVEL", right - 38.0, ui::baseline(top + 25.0, 13.0), 13.0, hex(ui::TEXT2), 2.0);
     }
-    match r.unlocks.as_slice() {
-        [] => {}
-        [one] => {
-            v.text_centered("NEW UNLOCK", cx, y, 18.0, hex(0xff9a3c));
-            v.text_centered(&format!("{} {}", one.name(), one.kind()), cx, y + 24.0, 22.0, WHITE);
-        }
+    let bar_r = Rect::new(left, top + 50.0, w, 12.0);
+    ui::progress(v, bar_r, r.into as f32 / r.need.max(1) as f32, &ui::Bar::xp().ticks(10).glow(0.9));
+    ui::caps_right(v, &format!("{} / {} XP", r.into, r.need), right, ui::baseline(top + 78.0, 12.0), 12.0, hex(ui::TEXT3), 1.0);
+
+    // New records as chips on the line under the bar.
+    let mut x = left;
+    for t in &r.records {
+        x += ui::pill(v, x, top + 78.0, t, 11.0, hex(ui::CYAN), ui::Pill::Soft) + 6.0;
+    }
+    let y = top + 94.0;
+    if r.unlocks.is_empty() {
+        return;
+    }
+    // New unlocks: a card with each item's swatch.
+    let card = Rect::new(left - 6.0, y, w + 12.0, 48.0);
+    let orange = hex(ui::ORANGE);
+    ui::glow(v, card, 9.0, 10.0, with_alpha(orange, 0.12));
+    ui::panel(v, card, &ui::Panel::card().radius(9.0).tint(orange, 0.12));
+    ui::stroke(v, card, 9.0, 1.0, with_alpha(orange, 0.45));
+    let equipped = skins::current();
+    let shown = r.unlocks.len().min(3);
+    let sw = 30.0;
+    for (i, &item) in r.unlocks.iter().take(shown).enumerate() {
+        let sx = card.x + 9.0 + i as f32 * (sw + 6.0);
+        draw_item_swatch(v, item, equipped, sx, card.y + 9.0, sw);
+        ui::stroke(v, Rect::new(sx - 1.0, card.y + 8.0, sw + 2.0, sw + 2.0), 4.0, 1.0, Color::new(1.0, 1.0, 1.0, 0.2));
+    }
+    let tx = card.x + 9.0 + shown as f32 * (sw + 6.0) + 4.0;
+    let tw = card.right() - 10.0 - tx;
+    let (chip, line) = match r.unlocks.as_slice() {
+        [one] => ("NEW UNLOCK".to_owned(), format!("{} {}", one.name(), one.kind())),
         many => {
-            v.text_centered(&format!("{} NEW UNLOCKS", many.len()), cx, y, 18.0, hex(0xff9a3c));
             let names: Vec<&str> = many.iter().take(3).map(|i| i.name()).collect();
             let more = if many.len() > 3 { format!(" +{}", many.len() - 3) } else { String::new() };
-            v.text_centered(&format!("{}{more}", names.join(", ")), cx, y + 24.0, 20.0, WHITE);
+            (format!("{} NEW UNLOCKS", many.len()), format!("{}{more}", names.join(", ")))
         }
-    }
-}
-
-/// Label on the left, value right-aligned: a compact table.
-fn stat_rows(v: &View, left: f32, right: f32, top: f32, rows: &[(&str, String)], row_h: f32, size: f32) {
-    for (i, (label, value)) in rows.iter().enumerate() {
-        let y = top + i as f32 * row_h;
-        v.text(label, left, y, size, hex(0x9aa3b8));
-        v.text_right(value, right, y, size, WHITE);
-    }
+    };
+    ui::pill(v, tx, card.y + 14.0, &chip, 10.0, orange, ui::Pill::Solid);
+    v.text(&line, tx, card.y + 40.0, ui::fit(v, &line, 18.0, tw), WHITE);
 }
 
 /// End-of-run numbers, shared by both result screens.
@@ -1165,38 +1212,53 @@ fn summary_rows(s: &Stats) -> Vec<(&'static str, String)> {
 }
 
 fn draw_classic_results(v: &View, game: &Game, reward: Option<&Reward>) {
-    let cx = BOARD_X + BOARD_W / 2.0;
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
-    v.text_centered("GAME OVER", cx, BOARD_Y + 90.0, 52.0, WHITE);
-    v.text_centered("score", cx, BOARD_Y + 140.0, 20.0, hex(0x9aa3b8));
-    v.text_centered(&game.score.to_string(), cx, BOARD_Y + 178.0, 38.0, hex(0xffd23f));
+    let card = results_card(v, hex(ui::GOLD));
+    let cx = card.center().x;
+    ui::text_shadow_centered(v, "GAME OVER", cx, BOARD_Y + 84.0, 48.0, WHITE);
+    ui::caps_centered(v, "SCORE", cx, BOARD_Y + 114.0, 13.0, hex(ui::TEXT2), 3.0);
+    let score = game.score.to_string();
+    ui::radial(v, cx, BOARD_Y + 142.0, 110.0, 26.0, with_alpha(hex(ui::GOLD), 0.16), with_alpha(hex(ui::GOLD), 0.0));
+    ui::text_shadow_centered(v, &score, cx, BOARD_Y + 160.0, 46.0, hex(ui::GOLD));
     let rows = summary_rows(&game.stats);
-    stat_rows(v, BOARD_X + 30.0, BOARD_X + BOARD_W - 30.0, BOARD_Y + 214.0, &rows, 24.0, 19.0);
+    stat_table(v, card.x + 18.0, card.right() - 18.0, BOARD_Y + 180.0, &rows, 21.0);
     if let Some(r) = reward {
-        draw_reward(v, r, BOARD_Y + 494.0);
+        draw_reward(v, r, BOARD_Y + 448.0);
     }
-    v.text_centered("Enter retry   ·   Esc menu", cx, BOARD_Y + 628.0, 20.0, hex(0x9aa3b8));
+    results_hints(v, card, "retry");
 }
 
 fn draw_pause(v: &View) {
     let cx = BOARD_X + BOARD_W / 2.0;
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
-    v.text_centered("PAUSED", cx, BOARD_Y + 120.0, 52.0, WHITE);
+    ui::fill(v, Rect::new(BOARD_X, BOARD_Y, BOARD_W, BOARD_H), 0.0, Color::new(0.02, 0.03, 0.05, 0.7), Color::new(0.02, 0.03, 0.05, 0.85));
+    let card = Rect::new(BOARD_X + 14.0, BOARD_Y + 74.0, BOARD_W - 28.0, 470.0);
+    ui::panel(v, card, &ui::Panel::card().radius(14.0));
+    ui::text_shadow_centered(v, "PAUSED", cx, card.y + 62.0, 48.0, WHITE);
     let controls = [
-        ("move", "Left / Right"),
+        ("move", "Left/Right"),
         ("soft drop", "Down"),
         ("hard drop", "Space"),
-        ("rotate cw", "Up / X"),
-        ("rotate ccw", "Z / Ctrl"),
-        ("hold", "C / Shift"),
+        ("rotate cw", "Up/X"),
+        ("rotate ccw", "Z/Ctrl"),
+        ("hold", "C/Shift"),
         ("motion (field)", "M"),
         ("scene effects", "E"),
         ("sound", "N"),
         ("music", "J"),
     ];
-    let rows: Vec<(&str, String)> = controls.iter().map(|&(a, k)| (a, k.to_owned())).collect();
-    stat_rows(v, BOARD_X + 40.0, BOARD_X + BOARD_W - 40.0, BOARD_Y + 180.0, &rows, 30.0, 20.0);
-    v.text_centered("Esc resume   ·   O settings   ·   Q menu", cx, BOARD_Y + 180.0 + rows.len() as f32 * 30.0 + 30.0, 22.0, hex(0x9aa3b8));
+    let (l, r) = (card.x + 20.0, card.right() - 20.0);
+    ui::section(v, l, card.y + 100.0, r - l, "CONTROLS", hex(ui::TEXT2));
+    for (i, (action, keys)) in controls.iter().enumerate() {
+        let cy = card.y + 124.0 + i as f32 * 29.0;
+        v.text(action, l, ui::baseline(cy, 18.0), 18.0, hex(ui::TEXT2));
+        // Keycaps, right-aligned.
+        let mut x = r;
+        for k in keys.rsplit('/') {
+            x -= ui::keycap_w(v, k, 14.0);
+            ui::keycap(v, x, cy, k, 14.0);
+            x -= 5.0;
+        }
+    }
+    ui::hints(v, cx, card.bottom() - 28.0, &[("Esc", "resume"), ("O", "settings"), ("Q", "menu")], 15.0);
 }
 
 // ───────────── Shadow 1v1 ─────────────
@@ -1247,15 +1309,16 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     let g = &vs.shadow;
     let p = vs.profile;
     let accent = hex(p.color);
-    let muted = hex(0x9aa3b8);
+    let muted = hex(ui::TEXT2);
     let (bw, bh) = (WIDTH as f32 * OPP_CELL, VISIBLE_ROWS as f32 * OPP_CELL);
 
-    v.text("SHADOW", PANEL_X, BOARD_Y - 8.0, 22.0, muted);
+    ui::section(v, PANEL_X, BOARD_Y - 10.0, MONSTER_PANEL_W, "SHADOW", muted);
     let face = 62.0;
     draw_reacting_portrait(v, vs, OPP_X, BOARD_Y + 4.0, face, still);
     let tx = OPP_X + face + 14.0;
-    v.text_mixed(p.name, tx, BOARD_Y + 34.0, if p.name.chars().count() > 8 { 30.0 } else { 40.0 }, accent);
-    v.text(&format!("{}  ·  {:.0}-{:.0} PPM", p.rank, p.ppm.0, p.ppm.1), tx, BOARD_Y + 60.0, 18.0, hex(0x5d6680));
+    text_mixed_shadow(v, p.name, tx, BOARD_Y + 32.0, if p.name.chars().count() > 8 { 30.0 } else { 40.0 }, accent);
+    let w = ui::pill(v, tx, BOARD_Y + 52.0, p.rank, 11.0, accent, ui::Pill::Soft);
+    v.text(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), tx + w + 8.0, ui::baseline(BOARD_Y + 52.0, 15.0), 15.0, hex(ui::TEXT3));
 
     // Field.
     let lost = vs.player_won();
@@ -1263,6 +1326,7 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     let their_danger = crate::danger::level(g);
     let beat = if still { 0.6 } else { 0.5 + 0.5 * (get_time() as f32 * (4.0 + 7.0 * their_danger)).sin() };
     let frame = if lost { hex(0x4a5064) } else { mix_colors(with_alpha(accent, 0.55), hex(0xff3b4f), their_danger * (0.45 + 0.55 * beat)) };
+    ui::shadow(v, Rect::new(OPP_X - 3.0, OPP_Y - 3.0, bw + 6.0, bh + 6.0), 4.0, 12.0, 4.0, 0.45);
     v.rect(OPP_X - 3.0, OPP_Y - 3.0, bw + 6.0, bh + 6.0, frame);
     v.rect(OPP_X, OPP_Y, bw, bh, hex(theme().field));
     let cell = |x: i32, y: i32| (OPP_X + x as f32 * OPP_CELL, OPP_Y + (y - HIDDEN_ROWS as i32) as f32 * OPP_CELL);
@@ -1300,30 +1364,33 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
 
     // Hold and next, small.
     let mini = 10.0;
-    v.text("HOLD", OPP_NEXT_X, OPP_Y + 12.0, 16.0, muted);
+    ui::caps(v, "HOLD", OPP_NEXT_X, OPP_Y + 12.0, 12.0, muted, 1.5);
     if let Some(k) = g.hold {
         draw_piece_sized(v, k, OPP_NEXT_X + 26.0, OPP_Y + 38.0, mini, piece_color(k));
     }
-    v.text("NEXT", OPP_NEXT_X, OPP_Y + 82.0, 16.0, muted);
+    ui::caps(v, "NEXT", OPP_NEXT_X, OPP_Y + 82.0, 12.0, muted, 1.5);
     for (i, &k) in g.next.iter().take(4).enumerate() {
         draw_piece_sized(v, k, OPP_NEXT_X + 26.0, OPP_Y + 108.0 + i as f32 * 40.0, mini, piece_color(k));
     }
 
-    // Its numbers.
+    // Its numbers, as tiles under its field.
     let s = &g.stats;
     let rows = [
         ("PPS", stats::fmt_rate(s.pps(), 2)),
         ("APM", stats::fmt_rate(s.apm(), 1)),
         ("SENT", vs.received.to_string()),
     ];
+    let tile_w = (bw + 6.0 - 16.0) / 3.0;
     for (i, (label, value)) in rows.iter().enumerate() {
-        let x = OPP_X + i as f32 * 80.0;
-        v.text(label, x, OPP_Y + bh + 28.0, 18.0, muted);
-        v.text(value, x, OPP_Y + bh + 56.0, 26.0, WHITE);
+        let t = Rect::new(OPP_X - 3.0 + i as f32 * (tile_w + 8.0), OPP_Y + bh + 12.0, tile_w, 52.0);
+        ui::panel(v, t, &ui::Panel::card().radius(8.0));
+        ui::caps(v, label, t.x + 10.0, t.y + 18.0, 12.0, muted, 1.5);
+        ui::text_shadow_right(v, value, t.right() - 10.0, t.y + 44.0, 24.0, WHITE);
     }
     if lost {
-        v.rect(OPP_X, OPP_Y + bh / 2.0 - 40.0, bw, 70.0, Color::new(0.0, 0.0, 0.0, 0.7));
-        v.text_centered("TOPPED OUT", OPP_X + bw / 2.0, OPP_Y + bh / 2.0 + 6.0, 30.0, hex(0x9aa3b8));
+        let band = Rect::new(OPP_X + 10.0, OPP_Y + bh / 2.0 - 34.0, bw - 20.0, 60.0);
+        ui::panel(v, band, &ui::Panel::card().radius(10.0));
+        ui::caps_centered(v, "TOPPED OUT", OPP_X + bw / 2.0, ui::baseline(band.center().y, 24.0), 24.0, hex(ui::TEXT2), 3.0);
     }
 }
 
@@ -1422,15 +1489,30 @@ fn draw_reacting_portrait(v: &View, vs: &Versus, x: f32, y: f32, size: f32, stil
 /// "3, 2, 1" over both fields, each number popping in.
 fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     let cx = BOARD_X + BOARD_W / 2.0;
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.45));
+    ui::fill(v, Rect::new(BOARD_X, BOARD_Y, BOARD_W, BOARD_H), 0.0, Color::new(0.02, 0.03, 0.05, 0.4), Color::new(0.02, 0.03, 0.05, 0.65));
     let n = left.ceil().max(1.0) as u32;
     // Motion off: the number just changes, without the pop.
     let k = if still { 0.6 } else { left.fract() };
     let size = 90.0 + 50.0 * k * k;
     let face = 150.0;
-    draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 70.0, face, WHITE);
-    v.text_centered(&n.to_string(), cx, BOARD_Y + BOARD_H / 2.0 + 40.0 + size * 0.3, size, with_alpha(WHITE, 0.4 + 0.6 * k));
-    v.text_mixed_centered(&format!("VS {}", vs.profile.name), cx, BOARD_Y + BOARD_H / 2.0 + 150.0, 28.0, hex(vs.profile.color));
+    let accent = hex(vs.profile.color);
+    let fy = BOARD_Y + 70.0;
+    let frame = Rect::new(cx - face / 2.0 - 3.0, fy - 3.0, face + 6.0, face + 6.0);
+    ui::glow(v, frame, 6.0, 18.0, with_alpha(accent, 0.3));
+    ui::shadow(v, frame, 6.0, 14.0, 6.0, 0.5);
+    draw_portrait(v, &vs.profile, cx - face / 2.0, fy, face, WHITE);
+    ui::stroke(v, frame, 6.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.4), 0.9));
+    let ny = BOARD_Y + BOARD_H / 2.0 + 40.0 + size * 0.3;
+    ui::radial(v, cx, ny - size * 0.35, size * 0.9, size * 0.6, with_alpha(accent, 0.18 * (0.4 + 0.6 * k)), with_alpha(accent, 0.0));
+    ui::text_shadow_centered(v, &n.to_string(), cx, ny, size, with_alpha(WHITE, 0.4 + 0.6 * k));
+    // "VS NAME" on a banner.
+    let label = format!("VS {}", vs.profile.name);
+    let lw = v.measure_mixed(&label, 26.0);
+    let by = BOARD_Y + BOARD_H / 2.0 + 142.0;
+    let banner = Rect::new(cx - lw / 2.0 - 22.0, by - 20.0, lw + 44.0, 40.0);
+    ui::panel(v, banner, &ui::Panel::card().radius(20.0).tint(accent, 0.15));
+    ui::stroke(v, banner, 20.0, 1.0, with_alpha(accent, 0.5));
+    text_mixed_shadow(v, &label, cx - lw / 2.0, ui::baseline(by, 26.0), 26.0, accent);
 }
 
 /// A quick "GO!" as the match starts.
@@ -1440,45 +1522,71 @@ fn draw_go(v: &View, vs: &Versus) {
     }
     let k = vs.time / 0.6;
     let cx = BOARD_X + BOARD_W / 2.0;
-    v.text_centered("GO!", cx, BOARD_Y + BOARD_H / 2.0 + 30.0, 90.0 + 40.0 * k, with_alpha(hex(0xffd23f), 1.0 - k));
+    let cy = BOARD_Y + BOARD_H / 2.0;
+    let gold = hex(ui::GOLD);
+    ui::radial(v, cx, cy, 150.0 + 80.0 * k, 70.0 + 30.0 * k, with_alpha(gold, 0.28 * (1.0 - k)), with_alpha(gold, 0.0));
+    ui::text_shadow_centered(v, "GO!", cx, cy + 30.0, 90.0 + 40.0 * k, with_alpha(gold, 1.0 - k));
 }
 
 fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats, reward: Option<&Reward>) {
-    let cx = BOARD_X + BOARD_W / 2.0;
-    v.rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, Color::new(0.0, 0.0, 0.0, 0.8));
-    let (title, color) = if won { ("VICTORY", hex(0xffd23f)) } else { ("DEFEAT", hex(0xff4f6d)) };
+    let (title, color) = if won { ("VICTORY", hex(ui::GOLD)) } else { ("DEFEAT", hex(ui::PINK)) };
+    let card = results_card(v, color);
+    let cx = card.center().x;
+    let accent = hex(vs.profile.color);
     let face = 64.0;
-    draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 14.0, face, if won { Color::new(0.5, 0.5, 0.55, 1.0) } else { WHITE });
-    v.text_centered(title, cx, BOARD_Y + 130.0, 58.0, color);
-    v.text_mixed_centered(&format!("vs {} ({})", vs.profile.name, vs.profile.rank.to_lowercase()), cx, BOARD_Y + 162.0, 22.0, hex(vs.profile.color));
-    v.text_centered(&stats::clock(vs.time), cx, BOARD_Y + 192.0, 22.0, hex(0x9aa3b8));
+    let fr = Rect::new(cx - face / 2.0 - 2.0, BOARD_Y + 26.0, face + 4.0, face + 4.0);
+    ui::shadow(v, fr, 6.0, 10.0, 4.0, 0.5);
+    draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 28.0, face, if won { Color::new(0.5, 0.5, 0.55, 1.0) } else { WHITE });
+    ui::stroke(v, fr, 4.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.3), 0.9));
+    ui::radial(v, cx, BOARD_Y + 124.0, 150.0, 40.0, with_alpha(color, 0.18), with_alpha(color, 0.0));
+    ui::text_shadow_centered(v, title, cx, BOARD_Y + 142.0, 52.0, color);
+    let vs_line = format!("vs {}", vs.profile.name);
+    let rank_w = ui::pill_w(v, vs.profile.rank, 11.0);
+    let line_w = v.measure_mixed(&vs_line, 20.0) + 8.0 + rank_w;
+    let lx = cx - line_w / 2.0;
+    v.text_mixed(&vs_line, lx, BOARD_Y + 170.0, 20.0, accent);
+    ui::pill(v, lx + line_w - rank_w, BOARD_Y + 164.0, vs.profile.rank, 11.0, accent, ui::Pill::Soft);
+    ui::pill_centered(v, cx, BOARD_Y + 190.0, &stats::clock(vs.time), 12.0, hex(ui::TEXT2), ui::Pill::Soft);
 
-    // You vs them, side by side.
+    // You vs them: each value in its own column, the better one bright, and a bar for
+    // who came out ahead.
     let theirs = &vs.shadow.stats;
-    let (left, mid, right) = (BOARD_X + 26.0, BOARD_X + 200.0, BOARD_X + BOARD_W - 26.0);
-    let top = BOARD_Y + 230.0;
-    v.text_right("YOU", mid, top, 20.0, WHITE);
-    v.text_mixed_right(vs.profile.name, right, top, 20.0, hex(vs.profile.color));
+    let (left, right) = (card.x + 18.0, card.right() - 18.0);
+    let top = BOARD_Y + 214.0;
+    ui::caps(v, "YOU", left, top, 13.0, WHITE, 2.0);
+    let nw = v.measure_mixed(vs.profile.name, 16.0);
+    let name_size = if nw > 200.0 { 16.0 * 200.0 / nw } else { 16.0 };
+    v.text_mixed_right(vs.profile.name, right, top, name_size, accent);
     let rows = [
-        ("PPS", stats::fmt_rate(mine.pps(), 2), stats::fmt_rate(theirs.pps(), 2)),
-        ("APM", stats::fmt_rate(mine.apm(), 1), stats::fmt_rate(theirs.apm(), 1)),
-        ("VS", stats::fmt_rate(mine.vs(), 1), stats::fmt_rate(theirs.vs(), 1)),
-        ("pieces", mine.pieces.to_string(), theirs.pieces.to_string()),
-        ("lines", mine.lines.to_string(), theirs.lines.to_string()),
-        ("garbage sent", vs.sent.to_string(), vs.received.to_string()),
-        ("quads", mine.quads.to_string(), theirs.quads.to_string()),
-        ("max combo", mine.max_combo.to_string(), theirs.max_combo.to_string()),
+        ("PPS", stats::fmt_rate(mine.pps(), 2), stats::fmt_rate(theirs.pps(), 2), mine.pps().unwrap_or(0.0), theirs.pps().unwrap_or(0.0)),
+        ("APM", stats::fmt_rate(mine.apm(), 1), stats::fmt_rate(theirs.apm(), 1), mine.apm().unwrap_or(0.0), theirs.apm().unwrap_or(0.0)),
+        ("VS", stats::fmt_rate(mine.vs(), 1), stats::fmt_rate(theirs.vs(), 1), mine.vs().unwrap_or(0.0), theirs.vs().unwrap_or(0.0)),
+        ("PIECES", mine.pieces.to_string(), theirs.pieces.to_string(), mine.pieces as f32, theirs.pieces as f32),
+        ("LINES", mine.lines.to_string(), theirs.lines.to_string(), mine.lines as f32, theirs.lines as f32),
+        ("GARBAGE SENT", vs.sent.to_string(), vs.received.to_string(), vs.sent as f32, vs.received as f32),
+        ("QUADS", mine.quads.to_string(), theirs.quads.to_string(), mine.quads as f32, theirs.quads as f32),
+        ("MAX COMBO", mine.max_combo.to_string(), theirs.max_combo.to_string(), mine.max_combo as f32, theirs.max_combo as f32),
     ];
-    for (i, (label, a, b)) in rows.iter().enumerate() {
-        let y = top + 36.0 + i as f32 * 30.0;
-        v.text(label, left, y, 20.0, hex(0x9aa3b8));
-        v.text_right(a, mid, y, 20.0, WHITE);
-        v.text_right(b, right, y, 20.0, WHITE);
+    let mine_color = hex(ui::CYAN);
+    for (i, (label, a, b, fa, fb)) in rows.iter().enumerate() {
+        let y = top + 8.0 + i as f32 * 26.0;
+        let cy = y + 11.0;
+        let (fa, fb) = (if fa.is_finite() { fa.max(0.0) } else { 0.0 }, if fb.is_finite() { fb.max(0.0) } else { 0.0 });
+        let (ca, cb) = if fa > fb { (WHITE, hex(ui::TEXT2)) } else if fb > fa { (hex(ui::TEXT2), WHITE) } else { (hex(ui::INK), hex(ui::INK)) };
+        v.text(a, left, ui::baseline(cy, 19.0), 19.0, ca);
+        v.text_right(b, right, ui::baseline(cy, 19.0), 19.0, cb);
+        ui::caps_centered(v, label, cx, ui::baseline(cy, 12.0), 12.0, hex(ui::TEXT2), 1.5);
+        // The tug-of-war bar.
+        let share = if fa + fb > 0.0 { fa / (fa + fb) } else { 0.5 };
+        let (bx, bw, by) = (left, right - left, y + 22.0);
+        let split = bx + bw * share;
+        v.rect(bx, by, split - bx - 1.0, 2.0, with_alpha(mine_color, if fa >= fb { 0.75 } else { 0.35 }));
+        v.rect(split + 1.0, by, bx + bw - split - 1.0, 2.0, with_alpha(accent, if fb >= fa { 0.75 } else { 0.35 }));
     }
     if let Some(r) = reward {
-        draw_reward(v, r, BOARD_Y + 494.0);
+        draw_reward(v, r, BOARD_Y + 432.0);
     }
-    v.text_centered("Enter rematch   ·   Esc menu", cx, BOARD_Y + 628.0, 20.0, hex(0x9aa3b8));
+    results_hints(v, card, "rematch");
 }
 
 /// The opponent select screen: one row per shadow (keyboard or mouse), details below.
@@ -2166,4 +2274,62 @@ mod settings_layout_tests {
             }
         }
     }
+}
+
+/// The card every results screen sits in, over the dimmed field.
+fn results_card(v: &View, accent: Color) -> Rect {
+    ui::fill(v, Rect::new(BOARD_X, BOARD_Y, BOARD_W, BOARD_H), 0.0, Color::new(0.02, 0.03, 0.05, 0.72), Color::new(0.02, 0.03, 0.05, 0.86));
+    let r = Rect::new(BOARD_X + 10.0, BOARD_Y + 14.0, BOARD_W - 20.0, BOARD_H - 28.0);
+    ui::panel(v, r, &ui::Panel::card().radius(14.0).tint(accent, 0.05));
+    // A wash of the accent behind the title.
+    ui::radial(v, r.center().x, r.y + 70.0, 170.0, 80.0, with_alpha(accent, 0.12), with_alpha(accent, 0.0));
+    r
+}
+
+/// Keys at the bottom of a results card.
+fn results_hints(v: &View, card: Rect, again: &str) {
+    ui::hints(v, card.center().x, card.bottom() - 18.0, &[("Enter", again), ("Esc", "menu")], 15.0);
+}
+
+/// Label on the left, value right-aligned, in faint alternating stripes.
+fn stat_table(v: &View, left: f32, right: f32, top: f32, rows: &[(&str, String)], row_h: f32) {
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let y = top + i as f32 * row_h;
+        if i % 2 == 0 {
+            ui::fill(v, Rect::new(left - 6.0, y, right - left + 12.0, row_h), 5.0, Color::new(1.0, 1.0, 1.0, 0.03), Color::new(1.0, 1.0, 1.0, 0.025));
+        }
+        let cy = y + row_h / 2.0;
+        let size = (row_h * 0.75).min(17.0);
+        v.text(label, left, ui::baseline(cy, size), size, hex(ui::TEXT2));
+        v.text_right(value, right, ui::baseline(cy, size), size, WHITE);
+    }
+}
+
+/// An item drawn in its own look, in a `sw` square at (sx, sy) (skins list, unlocks).
+fn draw_item_swatch(v: &View, item: Item, equipped: skins::Skin, sx: f32, sy: f32, sw: f32) {
+    skins::with(item.apply(equipped), || match item {
+        Item::Style(st) => v.block_styled(st, sx, sy, sw, piece_color(PieceKind::T)),
+        Item::Theme(th) => {
+            let tc = th.colors();
+            ui::fill(v, Rect::new(sx, sy, sw, sw), 4.0, mix_colors(hex(tc.frame), WHITE, 0.15), hex(tc.frame));
+            ui::fill(v, Rect::new(sx + 2.5, sy + 2.5, sw - 5.0, sw - 5.0), 2.5, mix_colors(hex(tc.field), WHITE, 0.05), hex(tc.field));
+            v.rect(sx + sw / 2.0, sy + 3.0, 1.0, sw - 6.0, hex(tc.grid));
+            v.rect(sx + 3.0, sy + sw / 2.0, sw - 6.0, 1.0, hex(tc.grid));
+        }
+        Item::Palette(_) => {
+            for (k, kind) in [PieceKind::I, PieceKind::T, PieceKind::Z, PieceKind::O].into_iter().enumerate() {
+                let h = sw / 2.0;
+                let (x, y) = (sx + (k % 2) as f32 * h, sy + (k / 2) as f32 * h);
+                let c = piece_color(kind);
+                ui::fill(v, Rect::new(x + 0.5, y + 0.5, h - 1.0, h - 1.0), 2.5, mix_colors(c, WHITE, 0.2), mix_colors(c, BLACK, 0.15));
+            }
+        }
+    });
+}
+
+/// `text_mixed` over a soft drop shadow.
+fn text_mixed_shadow(v: &View, t: &str, x: f32, y: f32, size: f32, c: Color) {
+    let o = (size / 26.0).max(1.0);
+    v.text_mixed(t, x + o * 0.5, y + o, size, Color::new(0.0, 0.0, 0.03, 0.55 * c.a));
+    v.text_mixed(t, x, y, size, c);
 }

@@ -7,6 +7,7 @@ use macroquad::prelude::*;
 use super::{alpha, mix};
 use crate::board::VISIBLE_ROWS;
 use crate::game::LineClear;
+use crate::ui;
 use crate::render::{BOARD_H, BOARD_W, BOARD_X, BOARD_Y, OPP_CELL, OPP_X, OPP_Y, PANEL_W, RIGHT_X, View, hex};
 
 pub(super) const MAX_CARDS: usize = 3;
@@ -121,28 +122,31 @@ pub(super) fn draw_cards(v: &View, cards: &[Card], on: bool, time: f32) {
         let x = STRIP_X - if on { 14.0 * (1.0 - out_back(pop)) } else { 0.0 };
         let y = CARDS_Y + c.y.max(0.0);
         let color = if c.rainbow && on { mix(hue(time * 0.6), WHITE, 0.25) } else { c.color };
+        let r = Rect::new(x, y, STRIP_W, CARD_H);
+        let rad = 8.0;
 
+        ui::shadow(v, r, rad, 10.0, 4.0, 0.4 * a);
         if i == 0 && on {
             // The newest card glows in its colour, dying down as it settles.
             let k = (1.0 - c.age / 0.9).max(0.0) * fade;
-            for (grow, ga) in [(6.0, 0.10), (3.0, 0.18)] {
-                v.rect(x - grow, y - grow, STRIP_W + 2.0 * grow, CARD_H + 2.0 * grow, alpha(color, ga * k));
-            }
+            ui::glow(v, r, rad, 10.0, alpha(color, 0.35 * k));
         }
-        v.rect(x, y, STRIP_W, CARD_H, alpha(hex(0x141824), 0.92 * a));
-        v.rect(x, y, 4.0, CARD_H, alpha(color, a));
+        ui::fill_h(v, r, rad, alpha(mix(hex(0x1c2233), color, 0.16), 0.95 * a), alpha(hex(0x11141f), 0.95 * a));
+        ui::stroke(v, r, rad, 1.0, alpha(color, 0.3 * a));
+        ui::shine(v, r, rad, 0.12 * a);
+        ui::accent_bar(v, Rect::new(x - 1.0, y, STRIP_W, CARD_H), alpha(color, a));
         if !c.sub.is_empty() {
-            let size = fit(v, &c.sub, 15.0, STRIP_W - 52.0);
-            v.text(&c.sub, x + 12.0, y + 16.0, size, alpha(mix(color, WHITE, 0.45), 0.9 * a));
+            let size = fit(v, &c.sub, 14.0, STRIP_W - 56.0);
+            v.text(&c.sub, x + 14.0, y + 16.0, size, alpha(mix(color, WHITE, 0.45), 0.9 * a));
         }
         if c.attack > 0 {
-            v.text_right(&format!("+{}", c.attack), x + STRIP_W - 8.0, y + 16.0, 16.0, alpha(WHITE, 0.85 * a));
+            let t = format!("+{}", c.attack);
+            ui::pill_right(v, x + STRIP_W - 6.0, y + 12.0, &t, 11.0, alpha(color, a), ui::Pill::Soft);
         }
-        let size = fit(v, c.title, 26.0, STRIP_W - 20.0);
+        let size = fit(v, c.title, 25.0, STRIP_W - 24.0);
         let ty = y + if c.sub.is_empty() && c.attack == 0 { 30.0 } else { 38.0 };
         let scale = if on { 0.7 + 0.3 * out_back(pop) } else { 1.0 };
-        v.text(c.title, x + 12.0 + 1.5, ty + 1.5, size * scale, alpha(BLACK, 0.5 * a));
-        v.text(c.title, x + 12.0, ty, size * scale, alpha(color, a));
+        ui::text_shadow(v, c.title, x + 14.0, ty, size * scale, alpha(mix(color, WHITE, 0.1), a));
     }
 }
 
@@ -151,26 +155,19 @@ pub(super) fn draw_meter(v: &View, shown: f32, frac: f32, on: bool, time: f32) {
     let max = super::METER_MAX;
     let k = (shown / max).clamp(0.0, 1.0);
     let (x, y, w) = (STRIP_X, METER_Y, STRIP_W);
-    v.text("POWER", x, y - 8.0, 22.0, hex(0x9aa3b8));
     let lines = (frac * max).ceil() as u32;
-    v.text_right(&lines.to_string(), x + w, y - 8.0, 22.0, if lines > 0 { WHITE } else { hex(0x5d6680) });
+    ui::section(v, x, y - 10.0, w - 28.0, "POWER", hex(ui::TEXT2));
+    v.text_right(&lines.to_string(), x + w, y - 8.0, 20.0, if lines > 0 { WHITE } else { hex(ui::TEXT3) });
 
     let fill = if k < 0.5 { mix(hex(0x2ee6d6), hex(0xffd23f), k * 2.0) } else { mix(hex(0xffd23f), hex(0xff4f6d), k * 2.0 - 1.0) };
+    let r = Rect::new(x, y, w, METER_H);
     if on && k > 0.4 {
         let pulse = 0.5 + 0.5 * (time * (5.0 + 6.0 * k)).sin();
-        v.rect(x - 3.0, y - 3.0, w * k + 6.0, METER_H + 6.0, alpha(fill, (0.08 + 0.1 * pulse) * k));
+        ui::glow(v, Rect::new(x, y, w * k, METER_H), METER_H / 2.0, 8.0, alpha(fill, (0.15 + 0.2 * pulse) * k));
     }
-    v.rect(x, y, w, METER_H, hex(0x10131c));
-    v.rect(x, y, w * k, METER_H, fill);
-    v.rect(x, y, w * k, METER_H * 0.3, alpha(mix(fill, WHITE, 0.5), 0.6));
-    if on && k > 0.0 {
-        v.rect(x + w * k - 2.0, y, 2.0, METER_H, alpha(WHITE, 0.7));
-    }
-    // A notch every 4 lines (a quad's worth).
-    for i in 1..(max as u32 / 4) {
-        v.rect(x + w * (i as f32 * 4.0 / max), y, 1.0, METER_H, hex(0x0b0d14));
-    }
-    v.outline(x, y, w, METER_H, 2.0, hex(0x262c3d));
+    // The fill runs from cyan to its current heat; a notch every 4 lines (a quad's worth).
+    let bar = ui::Bar::new(hex(0x2ee6d6), fill).stretch().ticks(max as u32 / 4).glow(if on { 0.8 } else { 0.0 });
+    ui::progress(v, r, k, &bar);
 }
 
 /// A glowing shot of garbage on its way across.
