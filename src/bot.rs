@@ -36,6 +36,8 @@ pub struct Profile {
     /// Finds tucks and spins (soft drop, then slide or rotate under overhangs), sets up
     /// T-spin slots, and chases T-spins, combos and perfect clears.
     pub spins: bool,
+    /// When the stack is low, searches the coming pieces for a perfect clear and plays it.
+    pub pc_search: bool,
     /// UI accent colour (0xRRGGBB).
     pub color: u32,
     /// Portrait art key (assets/portraits/<key>.png).
@@ -43,7 +45,24 @@ pub struct Profile {
 }
 
 /// Easiest first.
-pub const SHADOWS: [Profile; 3] = [
+pub const SHADOWS: [Profile; 6] = [
+    Profile {
+        name: "LUOYI ANGEL",
+        blurb: "Gentle and patient. The perfect first opponent.",
+        rank: "NOVICE",
+        // About 0.75x Luoyi.
+        ppm: (45.0, 52.0),
+        key_gap: 0.1,
+        sloppy: 0.08,
+        misdrop: 0.0,
+        stacks_for_quads: true,
+        holds: true,
+        lookahead: false,
+        spins: false,
+        pc_search: false,
+        color: 0xf4e3a1,
+        portrait: "luoyi_angel",
+    },
     Profile {
         name: "LUOYI",
         blurb: "Learning to stack for quads. Slow, but tidy.",
@@ -56,8 +75,25 @@ pub const SHADOWS: [Profile; 3] = [
         holds: true,
         lookahead: false,
         spins: false,
+        pc_search: false,
         color: 0x7fd8ff,
         portrait: "luoyi",
+    },
+    Profile {
+        name: "LUOYI EXTREME",
+        blurb: "Luoyi, sharper. A little faster, a lot fewer slips.",
+        rank: "INTERMEDIATE",
+        ppm: (70.0, 78.0),
+        key_gap: 0.07,
+        sloppy: 0.08,
+        misdrop: 0.0,
+        stacks_for_quads: true,
+        holds: true,
+        lookahead: false,
+        spins: false,
+        pc_search: false,
+        color: 0xff6a3c,
+        portrait: "luoyi_extreme",
     },
     Profile {
         name: "DEON",
@@ -72,6 +108,7 @@ pub const SHADOWS: [Profile; 3] = [
         holds: true,
         lookahead: true,
         spins: false,
+        pc_search: false,
         color: 0x5cdb5c,
         portrait: "deon",
     },
@@ -88,8 +125,26 @@ pub const SHADOWS: [Profile; 3] = [
         holds: true,
         lookahead: true,
         spins: true,
+        pc_search: false,
         color: 0xc061ff,
         portrait: "deon_extreme",
+    },
+    Profile {
+        name: "DEON NIGHTMARE",
+        blurb: "Don't. Perfect clears on sight, T-spins, no wasted move.",
+        rank: "NIGHTMARE",
+        // About 1.5x Deon Extreme.
+        ppm: (166.0, 180.0),
+        key_gap: 0.022,
+        sloppy: 0.0,
+        misdrop: 0.0,
+        stacks_for_quads: true,
+        holds: true,
+        lookahead: true,
+        spins: true,
+        pc_search: true,
+        color: 0xff3b1f,
+        portrait: "deon_nightmare",
     },
 ];
 
@@ -97,7 +152,7 @@ pub const SHADOWS: [Profile; 3] = [
 const SPAWN_X: i32 = 3;
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
 /// A sloppy pick stays within this much of the best placement's score.
-const SLOPPY_MARGIN: f32 = 6.0;
+const SLOPPY_MARGIN: f32 = 3.0;
 /// The column kept open for quads.
 const WELL: usize = WIDTH - 1;
 
@@ -117,6 +172,11 @@ pub struct Bot {
     /// Pieces locked so far (to notice a new piece).
     seen_pieces: u32,
     planned: bool,
+    /// The plan was made at spawn (for timing); it is made again from where the piece
+    /// actually is (gravity moves it meanwhile) just before the first key.
+    fresh: bool,
+    /// Where the piece was when the plan was made.
+    planned_at: Option<Active>,
 }
 
 impl Bot {
@@ -128,6 +188,8 @@ impl Bot {
             key_timer: 0.0,
             seen_pieces: 0,
             planned: false,
+            fresh: false,
+            planned_at: None,
         };
         bot
     }
@@ -158,9 +220,19 @@ impl Bot {
             let keys = self.plan.iter().filter(|&&a| a != Action::SoftDrop).count().max(1) as f32;
             self.plan.reverse();
             self.planned = true;
+            self.fresh = false;
+            self.planned_at = Some(game.active);
             self.key_timer = (total - (keys - 1.0) * self.profile.key_gap).max(0.0);
         }
         self.key_timer -= dt;
+        if self.key_timer <= 0.0 && !self.fresh {
+            self.fresh = true;
+            // Only if gravity moved the piece: otherwise the plan still holds.
+            if self.planned_at != Some(game.active) {
+                self.plan = self.choose(game);
+                self.plan.reverse();
+            }
+        }
         while self.key_timer <= 0.0 {
             let Some(action) = self.plan.pop() else {
                 break;
@@ -371,6 +443,218 @@ fn t_slot(b: &Board) -> Option<(usize, u32)> {
     best
 }
 
+// ───────────── Perfect-clear search ─────────────
+//
+// On a low stack the bottom rows fit in a u64 (bit `row * 10 + x`, row 0 at the floor).
+// A depth-first search over the coming pieces (with hold) looks for placements that fill
+// every cell and leave the board empty; the first of them is played.
+
+/// Highest stack a perfect clear is searched from (rows).
+const PC_MAX_HEIGHT: u32 = 4;
+/// Search budget per decision (nodes), so a hopeless search can't stall the game.
+const PC_NODE_BUDGET: u32 = 60_000;
+
+/// A piece's cells for a rotation as (dx, rows above its lowest cell).
+fn pc_shape(kind: PieceKind, rot: u8) -> [(i32, i32); 4] {
+    let cells = kind.cells(rot);
+    let bottom = cells.iter().map(|c| c.1).max().unwrap();
+    cells.map(|(cx, cy)| (cx, bottom - cy))
+}
+
+/// The low part of a field as bits, if everything above `PC_MAX_HEIGHT` rows is empty.
+fn pc_bits(board: &Board) -> Option<(u64, u32)> {
+    let mut bits = 0u64;
+    let mut height = 0;
+    for y in 0..TOTAL_ROWS {
+        let row = (TOTAL_ROWS - 1 - y) as u32;
+        for x in 0..WIDTH {
+            if board.get(x, y).is_some() {
+                if row >= PC_MAX_HEIGHT {
+                    return None;
+                }
+                bits |= 1 << (row * WIDTH as u32 + x as u32);
+                height = height.max(row + 1);
+            }
+        }
+    }
+    Some((bits, height))
+}
+
+/// Hard-drops `shape` at column `x` onto `bits`; returns the cells' bits and lowest row,
+/// if it lands entirely below `limit` rows.
+fn pc_drop(bits: u64, shape: &[(i32, i32); 4], x: i32, limit: u32) -> Option<(u64, u32)> {
+    if shape.iter().any(|&(dx, _)| x + dx < 0 || x + dx >= WIDTH as i32) {
+        return None;
+    }
+    let mask = |r: i32| -> Option<u64> {
+        let mut m = 0u64;
+        for &(dx, dy) in shape {
+            let row = r + dy;
+            if row < 0 {
+                return None;
+            }
+            if row < 6 {
+                m |= 1 << (row as u32 * WIDTH as u32 + (x + dx) as u32);
+            }
+        }
+        Some(m)
+    };
+    let mut r = 6;
+    while let Some(m) = mask(r - 1) {
+        if m & bits != 0 {
+            break;
+        }
+        r -= 1;
+    }
+    let m = mask(r)?;
+    if shape.iter().any(|&(_, dy)| (r + dy) as u32 >= limit) {
+        return None;
+    }
+    Some((m, r as u32))
+}
+
+/// Clears full rows (shifting the ones above down).
+fn pc_clear(bits: u64, height: u32) -> (u64, u32) {
+    let full = (1u64 << WIDTH) - 1;
+    let mut out = 0u64;
+    let mut kept = 0;
+    for row in 0..height {
+        let r = (bits >> (row * WIDTH as u32)) & full;
+        if r != full {
+            out |= r << (kept * WIDTH as u32);
+            kept += 1;
+        }
+    }
+    (out, kept)
+}
+
+/// Whether some empty cell sits under a filled one (only spins could fill it).
+fn pc_covered(bits: u64, height: u32) -> bool {
+    (0..WIDTH as u32).any(|x| {
+        let mut seen_empty = false;
+        for row in 0..height {
+            let filled = bits >> (row * WIDTH as u32 + x) & 1 == 1;
+            if !filled {
+                seen_empty = true;
+            } else if seen_empty {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+struct PcSearch<'a> {
+    queue: &'a [PieceKind],
+    nodes: u32,
+    dead: std::collections::HashSet<(u64, u32, usize, Option<PieceKind>)>,
+}
+
+impl PcSearch<'_> {
+    /// Can `bits` (filling `height` rows exactly) be cleared from queue position `i` with `hold`?
+    fn solve(&mut self, bits: u64, height: u32, i: usize, hold: Option<PieceKind>) -> bool {
+        if bits == 0 && height == 0 {
+            return true;
+        }
+        let empty = height * WIDTH as u32 - bits.count_ones();
+        let left = self.queue.len().saturating_sub(i) as u32 + hold.is_some() as u32;
+        if empty % 4 != 0 || empty / 4 > left || self.nodes > PC_NODE_BUDGET {
+            return false;
+        }
+        let key = (bits, height, i, hold);
+        if self.dead.contains(&key) {
+            return false;
+        }
+        self.nodes += 1;
+        for (kind, next_i, next_hold) in self.options(i, hold) {
+            for rot in 0..4u8 {
+                if kind == PieceKind::O && rot > 0 {
+                    break;
+                }
+                let shape = pc_shape(kind, rot);
+                for x in -3..WIDTH as i32 {
+                    let Some((m, _)) = pc_drop(bits, &shape, x, height) else { continue };
+                    let (after, h) = pc_clear(bits | m, height);
+                    if pc_covered(after, h) {
+                        continue;
+                    }
+                    if self.solve(after, h, next_i, next_hold) {
+                        return true;
+                    }
+                }
+            }
+        }
+        self.dead.insert(key);
+        false
+    }
+
+    /// The pieces playable at queue position `i`: the current one, or (via hold) the held
+    /// one or the one after. With where the queue and hold stand afterwards.
+    fn options(&self, i: usize, hold: Option<PieceKind>) -> Vec<(PieceKind, usize, Option<PieceKind>)> {
+        let mut out = Vec::new();
+        let Some(&cur) = self.queue.get(i) else {
+            return hold.map(|h| vec![(h, i, None)]).unwrap_or_default();
+        };
+        out.push((cur, i + 1, hold));
+        match hold {
+            Some(h) if h != cur => out.push((h, i + 1, Some(cur))),
+            None => {
+                if let Some(&n) = self.queue.get(i + 1) {
+                    out.push((n, i + 2, Some(cur)));
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// If the coming pieces can clear the whole field, the keys for this piece's part of it.
+fn perfect_clear_move(game: &Game) -> Option<Vec<Action>> {
+    let (bits, height) = pc_bits(&game.board)?;
+    if bits == 0 {
+        return None;
+    }
+    let mut queue = vec![game.active.kind];
+    queue.extend(game.next.iter().copied());
+    // Smallest height the clear can finish at with these pieces.
+    let target = (height.max(1)..=PC_MAX_HEIGHT).find(|&h| (h * WIDTH as u32 - bits.count_ones()) % 4 == 0)?;
+    let mut search = PcSearch { queue: &queue, nodes: 0, dead: Default::default() };
+    let can_hold = !game.hold_used;
+    for (kind, next_i, next_hold) in search.options(0, game.hold) {
+        let held = kind != game.active.kind || next_i == 2;
+        if held && !can_hold {
+            continue;
+        }
+        for rot in 0..4u8 {
+            let shape = pc_shape(kind, rot);
+            for x in -3..WIDTH as i32 {
+                let Some((m, _)) = pc_drop(bits, &shape, x, target) else { continue };
+                let (after, h) = pc_clear(bits | m, target);
+                if pc_covered(after, h) || !search.solve(after, h, next_i, next_hold) {
+                    continue;
+                }
+                // Found: the keys that put this piece on exactly those cells.
+                let start = if held { spawn(kind) } else { game.active };
+                let prefix: Vec<Action> = if held { vec![Action::Hold] } else { vec![] };
+                let want = m;
+                return placements(&game.board, start, &prefix).into_iter().find_map(|p| {
+                    let mut got = 0u64;
+                    for (cx, cy) in p.piece.cells() {
+                        let row = TOTAL_ROWS as i32 - 1 - cy;
+                        if !(0..6).contains(&row) {
+                            return None;
+                        }
+                        got |= 1 << (row as u32 * WIDTH as u32 + cx as u32);
+                    }
+                    (got == want).then_some(p.keys)
+                });
+            }
+        }
+    }
+    None
+}
+
 fn spawn(kind: PieceKind) -> Active {
     Active { kind, rot: 0, x: SPAWN_X, y: SPAWN_Y }
 }
@@ -378,6 +662,11 @@ fn spawn(kind: PieceKind) -> Active {
 /// Every placement of the current piece and (if allowed) the hold piece, scored.
 /// Shadows that look ahead also try the piece after it on each resulting field.
 fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
+    if profile.pc_search {
+        if let Some(keys) = perfect_clear_move(game) {
+            return vec![Candidate { score: 1e9, actions: keys }];
+        }
+    }
     let pending = game.pending_garbage();
     let mut starts = vec![(game.active, Vec::new(), game.next[0])];
     if profile.holds && !game.hold_used {
@@ -460,9 +749,14 @@ fn settle(board: &Board, piece: Active, t_spin: bool) -> Option<Settled> {
 
 /// How high the stack (plus garbage on its way) stands above where it gets risky.
 fn danger(field: &Board, pending: u32, profile: Profile) -> f32 {
-    let max_h = *heights(field).iter().max().unwrap_or(&0);
+    let h = heights(field);
+    let max_h = *h.iter().max().unwrap_or(&0);
+    // Buried holes count too: a holey stack should dig, not keep building on top.
+    let holes = (0..WIDTH)
+        .map(|x| ((TOTAL_ROWS - h[x] as usize)..TOTAL_ROWS).filter(|&y| field.get(x, y).is_none()).count())
+        .sum::<usize>() as f32;
     let safe = if profile.stacks_for_quads { 11.0 } else { 8.0 };
-    ((max_h + pending as i32) as f32 - safe).max(0.0)
+    ((max_h + pending as i32) as f32 + 1.5 * holes - safe).max(0.0)
 }
 
 /// What a lock's clear is worth to this shadow, and the chain after it.
@@ -597,7 +891,7 @@ mod tests {
     #[test]
     fn deon_plays_at_1_6_to_1_7_pieces_per_second() {
         for seed in 1..=4 {
-            let g = solo(SHADOWS[1], 180.0, seed);
+            let g = solo(SHADOWS[3], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: Deon topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((96.0..=102.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM (1.6-1.7 PPS)");
@@ -619,7 +913,7 @@ mod tests {
     fn deon_clears_with_quads_not_random_lines() {
         let (mut lines, mut quad_lines) = (0, 0);
         for seed in [1, 2, 4, 6, 8, 10] {
-            let g = solo(SHADOWS[1], 180.0, seed);
+            let g = solo(SHADOWS[3], 180.0, seed);
             lines += g.stats.lines;
             quad_lines += 4 * g.stats.quads;
         }
@@ -632,7 +926,7 @@ mod tests {
     fn deon_extreme_is_fast_and_spins() {
         let mut spins = 0;
         for seed in [1, 2, 4, 6] {
-            let g = solo(SHADOWS[2], 180.0, seed);
+            let g = solo(SHADOWS[4], 180.0, seed);
             assert!(!g.game_over, "seed {seed}: topped out alone");
             let ppm = g.stats.pps().unwrap() * 60.0;
             assert!((110.0..=120.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
@@ -641,17 +935,42 @@ mod tests {
         assert!(spins >= 12, "only {spins} T-spins in 12 minutes");
     }
 
+    /// Deon Nightmare: about 1.5x Deon Extreme's pace, and perfect clears in every game.
+    #[test]
+    fn deon_nightmare_is_fast_and_perfect_clears() {
+        let mut pcs = 0;
+        for seed in [1, 2, 4, 6] {
+            let g = solo(SHADOWS[5], 120.0, seed);
+            assert!(!g.game_over, "seed {seed}: topped out alone");
+            let ppm = g.stats.pps().unwrap() * 60.0;
+            assert!((160.0..=182.0).contains(&ppm), "seed {seed}: {ppm:.1} PPM");
+            pcs += g.stats.perfect_clears;
+        }
+        assert!(pcs >= 4, "only {pcs} perfect clears in 8 minutes");
+    }
+
+    /// The beginner shadows survive on their own (beating them should take playing).
+    #[test]
+    fn beginner_shadows_survive_alone() {
+        for p in &SHADOWS[..3] {
+            for seed in 1..=8 {
+                let g = solo(*p, 180.0, seed);
+                assert!(!g.game_over, "{} seed {seed}: topped out alone", p.name);
+            }
+        }
+    }
+
     #[test]
     fn deon_outpaces_luoyi() {
         let lines = |p: Profile| solo(p, 120.0, 11).stats.lines;
-        let (luoyi, deon) = (lines(SHADOWS[0]), lines(SHADOWS[1]));
+        let (luoyi, deon) = (lines(SHADOWS[1]), lines(SHADOWS[3]));
         assert!(deon > luoyi, "Deon {deon} lines vs Luoyi {luoyi}");
     }
 
     #[test]
     fn candidates_include_hold_and_every_column() {
         let g = Game::new(3);
-        let c = candidates(&g, SHADOWS[1]);
+        let c = candidates(&g, SHADOWS[3]);
         assert!(c.iter().any(|c| c.actions.first() == Some(&Action::Hold)));
         assert!(c.iter().all(|c| c.actions.last() == Some(&Action::HardDrop)));
         assert!(c.len() >= 20, "{} placements", c.len());
@@ -664,9 +983,9 @@ mod probe {
     #[test]
     #[ignore]
     fn probe_survival() {
-        let mut list = SHADOWS.to_vec();
+        let list = SHADOWS.to_vec();
         for (i, p) in list.iter().enumerate() {
-            for seed in [1u64, 2, 4, 6, 8, 10, 12, 14, 16, 18] {
+            for seed in 1u64..=20 {
                 let mut g = Game::new(seed);
                 g.set_level(1);
                 let mut bot = Bot::new(*p, seed);
@@ -715,5 +1034,65 @@ mod spin_tests {
         let tsd = found.iter().find(|p| p.t_spin && settle(&b, p.piece, true).is_some_and(|s| s.lines == 2));
         assert!(tsd.is_some(), "no TSD among {} placements", found.len());
         assert!(t_slot(&b).is_some_and(|(rows, _)| rows == 2), "slot not recognised: {:?}", t_slot(&b));
+    }
+
+    #[test]
+    fn finds_a_one_piece_perfect_clear() {
+        // Bottom row full except columns 0-3: a flat I clears the board.
+        let mut g = Game::new(5);
+        for x in 4..WIDTH {
+            g.board.set(x, TOTAL_ROWS - 1, PieceKind::J);
+        }
+        g.active = spawn(PieceKind::I);
+        let keys = perfect_clear_move(&g).expect("perfect clear not found");
+        for k in keys {
+            g.apply(k);
+        }
+        assert!(g.board.is_empty(), "board not cleared");
+        assert_eq!(g.stats.perfect_clears, 1);
+    }
+
+    #[test]
+    fn finds_a_perfect_clear_needing_two_pieces_and_hold() {
+        // Two rows, missing an O-shaped 2x2 at columns 0-1 and an I-shaped gap at 6-9 on top.
+        let mut g = Game::new(5);
+        let bottom = TOTAL_ROWS - 1;
+        for x in 2..WIDTH {
+            g.board.set(x, bottom, PieceKind::J);
+        }
+        for x in 2..6 {
+            g.board.set(x, bottom - 1, PieceKind::J);
+        }
+        // Needs an O (cols 0-1, both rows) and an I (cols 6-9, top row).
+        g.active = spawn(PieceKind::I);
+        g.next[0] = PieceKind::O;
+        assert!(perfect_clear_move(&g).is_some());
+    }
+}
+#[cfg(test)]
+mod timing {
+    use super::*;
+    /// Worst and average time per decision for each shadow (`--ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn decision_time() {
+        for p in SHADOWS {
+            let mut g = Game::new(3);
+            g.set_level(1);
+            let mut bot = Bot::new(p, 3);
+            let (mut worst, mut total, mut n) = (0.0f64, 0.0f64, 0);
+            for _ in 0..200 {
+                if g.game_over { break; }
+                let t = std::time::Instant::now();
+                let keys = bot.choose(&g);
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                worst = worst.max(ms);
+                total += ms;
+                n += 1;
+                for k in keys { g.apply(k); }
+                g.take_events();
+            }
+            println!("{:15} avg {:.2} ms  worst {:.2} ms", p.name, total / n as f64, worst);
+        }
     }
 }
