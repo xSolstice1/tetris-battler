@@ -12,20 +12,21 @@ use crate::piece::PieceKind;
 use crate::stats::{self, Stats};
 use crate::bot::Profile;
 use crate::versus::{Phase as VsPhase, Versus};
+use crate::scene::{self, Scene, Theme};
 
 /// Virtual canvas width for Classic and the menu; Battler adds the monster panel.
 const CLASSIC_W: f32 = 760.0;
 const BATTLE_W: f32 = 1100.0;
-const VIRTUAL_H: f32 = 760.0;
+pub(crate) const VIRTUAL_H: f32 = 760.0;
 pub const CELL: f32 = 32.0;
 const MINI: f32 = 20.0;
 pub const BOARD_X: f32 = 220.0;
 pub const BOARD_Y: f32 = 80.0;
 pub const BOARD_W: f32 = WIDTH as f32 * CELL;
-const BOARD_H: f32 = VISIBLE_ROWS as f32 * CELL;
+pub(crate) const BOARD_H: f32 = VISIBLE_ROWS as f32 * CELL;
 const LEFT_X: f32 = 40.0;
-const RIGHT_X: f32 = BOARD_X + BOARD_W + 30.0;
-const PANEL_W: f32 = 150.0;
+pub(crate) const RIGHT_X: f32 = BOARD_X + BOARD_W + 30.0;
+pub(crate) const PANEL_W: f32 = 150.0;
 
 pub fn hex(rgb: u32) -> Color {
     Color::from_rgba((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
@@ -80,17 +81,17 @@ impl View {
         draw_rectangle(self.ox + x * s, self.oy + y * s, w * s, h * s, c);
     }
 
-    fn outline(&self, x: f32, y: f32, w: f32, h: f32, thickness: f32, c: Color) {
+    pub(crate) fn outline(&self, x: f32, y: f32, w: f32, h: f32, thickness: f32, c: Color) {
         let s = self.scale;
         draw_rectangle_lines(self.ox + x * s, self.oy + y * s, w * s, h * s, thickness * s, c);
     }
 
-    fn text(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
+    pub(crate) fn text(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
         draw_text(t, self.ox + x * s, self.oy + y * s, size * s, c);
     }
 
-    fn text_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
+    pub(crate) fn text_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
         let dims = measure_text(t, None, (size * s).max(1.0) as u16, 1.0);
         draw_text(t, self.ox + right * s - dims.width, self.oy + y * s, size * s, c);
@@ -107,12 +108,12 @@ impl View {
         draw_ellipse(self.ox + cx * s, self.oy + cy * s, rx * s, ry * s, 0.0, c);
     }
 
-    fn circle(&self, cx: f32, cy: f32, r: f32, c: Color) {
+    pub(crate) fn circle(&self, cx: f32, cy: f32, r: f32, c: Color) {
         let s = self.scale;
         draw_circle(self.ox + cx * s, self.oy + cy * s, r * s, c);
     }
 
-    fn circle_lines(&self, cx: f32, cy: f32, r: f32, thickness: f32, c: Color) {
+    pub(crate) fn circle_lines(&self, cx: f32, cy: f32, r: f32, thickness: f32, c: Color) {
         let s = self.scale;
         draw_circle_lines(self.ox + cx * s, self.oy + cy * s, r * s, thickness * s, c);
     }
@@ -221,10 +222,13 @@ fn panel(v: &View, label: &str, x: f32, y: f32, w: f32, h: f32) {
     v.outline(x, y, w, h, 2.0, hex(0x262c3d));
 }
 
-pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&Battle>, versus: Option<&Versus>) {
+pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, battle: Option<&Battle>, versus: Option<&Versus>) {
     clear_background(hex(0x0b0d14));
     let width = if battle.is_some() || versus.is_some() { BATTLE_W } else { CLASSIC_W };
     let v = View::fit_window(fx.shake_offset(), width);
+    scene.draw_back(&v, width);
+    // Scene effects off: nothing off the field moves on its own.
+    let scene_still = !scene.on();
     let field_bg = hex(0x10131c);
     // Motion off: nothing on screen moves on its own.
     let still = !fx.motion().animated();
@@ -332,15 +336,17 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         draw_mini_piece(&v, kind, LEFT_X + PANEL_W / 2.0, BOARD_Y + 50.0, c);
     }
 
+    // Score and lines tick up (scene effects), brighter while they're counting.
+    let counting = if scene.ticking(game) { mix_colors(WHITE, hex(0xffd23f), 0.45) } else { WHITE };
     let stats = [
-        ("SCORE", game.score.to_string()),
-        ("LINES", game.lines.to_string()),
-        ("LEVEL", game.level.to_string()),
+        ("SCORE", scene.score().to_string(), counting),
+        ("LINES", scene.lines().to_string(), WHITE),
+        ("LEVEL", game.level.to_string(), WHITE),
     ];
-    for (i, (label, value)) in stats.iter().enumerate() {
+    for (i, (label, value, color)) in stats.iter().enumerate() {
         let y = BOARD_Y + 160.0 + i as f32 * 70.0;
         v.text(label, LEFT_X, y, 22.0, hex(0x9aa3b8));
-        v.text(value, LEFT_X, y + 32.0, 34.0, WHITE);
+        v.text(value, LEFT_X, y + 32.0, 34.0, *color);
     }
 
     // Live performance stats.
@@ -358,8 +364,10 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     let motion_y = BOARD_Y + 570.0;
     v.text("M  motion:", LEFT_X, motion_y, 18.0, hex(0x5d6680));
     v.text(fx.motion().label(), LEFT_X + 84.0, motion_y, 18.0, hex(0x9aa3b8));
-    v.text("N  sound:", LEFT_X, motion_y + 22.0, 18.0, hex(0x5d6680));
-    v.text(if sound_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 22.0, 18.0, hex(0x9aa3b8));
+    v.text("E  scene:", LEFT_X, motion_y + 22.0, 18.0, hex(0x5d6680));
+    v.text(if scene.on() { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 22.0, 18.0, hex(0x9aa3b8));
+    v.text("N  sound:", LEFT_X, motion_y + 44.0, 18.0, hex(0x5d6680));
+    v.text(if sound_on { "on" } else { "off" }, LEFT_X + 84.0, motion_y + 44.0, 18.0, hex(0x9aa3b8));
 
     // Next queue on the right.
     let slot = 80.0;
@@ -367,7 +375,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     panel(&v, "NEXT", RIGHT_X, BOARD_Y, PANEL_W, queue_h);
     if battle.is_some_and(Battle::next_hidden) {
         // Fog ability: the queue is hidden behind drifting murk.
-        let t = if still { 0.0 } else { get_time() as f32 };
+        let t = if scene_still { 0.0 } else { get_time() as f32 };
         for i in 0..6 {
             let y = BOARD_Y + 8.0 + i as f32 * (queue_h - 16.0) / 6.0;
             let drift = (t * 1.5 + i as f32).sin() * 10.0;
@@ -386,8 +394,10 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
         }
     }
 
+    scene.draw_side(&v);
+
     if let Some(b) = battle {
-        draw_battle_panel(&v, b, still);
+        draw_battle_panel(&v, b, scene_still);
         if let Phase::Intermission { .. } = b.phase {
             let next = battle::monster(b.monster.tier + 1);
             v.rect(BOARD_X, BOARD_Y + 250.0, BOARD_W, 120.0, Color::new(0.0, 0.0, 0.0, 0.6));
@@ -403,7 +413,8 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, sound_on: bool, battle: Option<&
     }
 
     if let Some(vs) = versus {
-        draw_versus_panel(&v, vs, still);
+        draw_versus_panel(&v, vs, scene_still);
+        scene.draw_shots(&v);
     }
 
     fx.draw_top(&v);
@@ -740,7 +751,8 @@ fn draw_pause(v: &View) {
         ("rotate cw", "Up / X"),
         ("rotate ccw", "Z / Ctrl"),
         ("hold", "C / Shift"),
-        ("motion", "M"),
+        ("motion (field)", "M"),
+        ("scene effects", "E"),
         ("sound", "N"),
     ];
     let rows: Vec<(&str, String)> = controls.iter().map(|&(a, k)| (a, k.to_owned())).collect();
@@ -786,9 +798,9 @@ fn draw_portrait(v: &View, p: &Profile, x: f32, y: f32, size: f32, tint: Color) 
     }
 }
 
-const OPP_CELL: f32 = 22.0;
-const OPP_X: f32 = PANEL_X + 14.0;
-const OPP_Y: f32 = BOARD_Y + 78.0;
+pub(crate) const OPP_CELL: f32 = 22.0;
+pub(crate) const OPP_X: f32 = PANEL_X + 14.0;
+pub(crate) const OPP_Y: f32 = BOARD_Y + 78.0;
 const OPP_NEXT_X: f32 = OPP_X + WIDTH as f32 * OPP_CELL + 14.0;
 
 /// The shadow's field, live: name, board, hold / next, its numbers.
@@ -1028,9 +1040,11 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats) {
 }
 
 /// The opponent select screen: one row per shadow (keyboard or mouse), details below.
-pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>) {
+pub fn draw_select(shadows: &[Profile], selected: usize, hover: Option<MenuHit>, scene_on: bool) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    let theme = shadows.get(selected).map_or_else(Theme::classic, Theme::shadow);
+    scene::draw_menu_backdrop(&v, CLASSIC_W, theme, scene_on);
     let cx = CLASSIC_W / 2.0;
     v.text_centered("CHOOSE YOUR SHADOW", cx, 118.0, 52.0, WHITE);
     v.text_centered("a true 1v1 against a bot at its own pace", cx, 156.0, 22.0, hex(0x5d6680));
@@ -1084,6 +1098,7 @@ const TOGGLE_GAP: f32 = 20.0;
 pub enum MenuHit {
     Item(usize),
     Motion,
+    Scene,
     Sound,
 }
 
@@ -1096,15 +1111,29 @@ fn menu_item_rect(i: usize) -> Rect {
     )
 }
 
-/// The blurb sits under the items; the toggles sit under the blurb.
+/// The blurb sits under the items; the toggles sit in a row under the blurb.
 fn menu_toggle_rect(items: usize, which: MenuHit) -> Rect {
     let y = MENU_TOP + items as f32 * (MENU_ITEM_H + MENU_ITEM_GAP) + 60.0;
-    let left = CLASSIC_W / 2.0 - TOGGLE_W - TOGGLE_GAP / 2.0;
-    let x = if which == MenuHit::Motion { left } else { left + TOGGLE_W + TOGGLE_GAP };
-    Rect::new(x, y, TOGGLE_W, TOGGLE_H)
+    let left = CLASSIC_W / 2.0 - 1.5 * TOGGLE_W - TOGGLE_GAP;
+    let slot = match which {
+        MenuHit::Motion => 0.0,
+        MenuHit::Scene => 1.0,
+        _ => 2.0,
+    };
+    Rect::new(left + slot * (TOGGLE_W + TOGGLE_GAP), y, TOGGLE_W, TOGGLE_H)
 }
 
 impl View {
+    /// Screen pixels per virtual unit (scene effects draw meshes in screen space).
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// Virtual coordinates -> screen pixels.
+    pub(crate) fn to_screen(&self, x: f32, y: f32) -> Vec2 {
+        vec2(self.ox + x * self.scale, self.oy + y * self.scale)
+    }
+
     /// Screen pixels -> virtual coordinates.
     fn to_virtual(&self, p: Vec2) -> Vec2 {
         vec2((p.x - self.ox) / self.scale, (p.y - self.oy) / self.scale)
@@ -1117,7 +1146,7 @@ pub fn menu_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
     let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
     (0..items)
         .map(MenuHit::Item)
-        .chain([MenuHit::Motion, MenuHit::Sound])
+        .chain([MenuHit::Motion, MenuHit::Scene, MenuHit::Sound])
         .find(|&hit| {
             let r = match hit {
                 MenuHit::Item(i) => menu_item_rect(i),
@@ -1127,9 +1156,10 @@ pub fn menu_hit(screen_pos: Vec2, items: usize) -> Option<MenuHit> {
         })
 }
 
-pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, motion: Motion) {
+pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, sound_on: bool, motion: Motion, scene_on: bool) {
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    scene::draw_menu_backdrop(&v, CLASSIC_W, Theme::classic(), scene_on);
     let cx = CLASSIC_W / 2.0;
 
     // A few static blocks as backdrop, one of each piece colour.
@@ -1158,6 +1188,7 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
 
     let toggles = [
         (MenuHit::Motion, format!("MOTION: {}", motion.label())),
+        (MenuHit::Scene, format!("SCENE: {}", if scene_on { "on" } else { "off" })),
         (MenuHit::Sound, format!("SOUND: {}", if sound_on { "on" } else { "off" })),
     ];
     for (which, label) in toggles {
@@ -1170,7 +1201,7 @@ pub fn draw_menu(items: &[MenuItem], selected: usize, hover: Option<MenuHit>, so
     }
 
     v.text_centered(
-        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / N toggle",
+        "Up/Down or mouse to choose  ·  Enter or click to play  ·  M / E / N toggle",
         cx,
         712.0,
         18.0,
@@ -1188,6 +1219,7 @@ mod tests {
         for items in 1..=4 {
             let mut rects: Vec<Rect> = (0..items).map(menu_item_rect).collect();
             rects.push(menu_toggle_rect(items, MenuHit::Motion));
+            rects.push(menu_toggle_rect(items, MenuHit::Scene));
             rects.push(menu_toggle_rect(items, MenuHit::Sound));
             for (i, a) in rects.iter().enumerate() {
                 assert!(a.x >= 0.0 && a.right() <= CLASSIC_W && a.bottom() < 700.0, "{items} items: {a:?}");

@@ -63,8 +63,9 @@ pub enum Motion {
     /// Every frame shows the real board: no flight, collapse or glide.
     /// Particles, shake and callouts stay, as they don't misrepresent the field.
     Competitive,
-    /// No animation at all: the real board, and no particles, shake, flashes,
-    /// callouts or moving decorations anywhere. Sound is unaffected. The default.
+    /// No animation on the field: the real board, and no particles, shake, flashes
+    /// or callouts. Sound is unaffected, and so is everything off the field (that's
+    /// the separate scene-effects setting, src/scene). The default.
     #[default]
     Off,
 }
