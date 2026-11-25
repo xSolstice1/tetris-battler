@@ -12,8 +12,10 @@ use crate::versus::{Versus, VsEvent};
 use crate::fx::{Fx, Motion};
 use crate::game::Game;
 use crate::input::Input;
-use crate::render::{self, MenuHit, MenuItem};
+use crate::progress::{Progress, Reward, Run, RunKind};
+use crate::render::{self, MenuHit, MenuItem, SkinsHit};
 use crate::scene::{Scene, Theme};
+use crate::skins;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -24,8 +26,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 3] = [Mode::Classic, Mode::Battler, Mode::Shadow];
-
     fn menu_item(self) -> MenuItem {
         match self {
             Mode::Classic => MenuItem {
@@ -42,6 +42,31 @@ impl Mode {
             },
         }
     }
+}
+
+/// A main menu entry: a mode to play, or the skins screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Entry {
+    Play(Mode),
+    Skins,
+}
+
+const MENU: [Entry; 4] = [Entry::Play(Mode::Classic), Entry::Play(Mode::Battler), Entry::Play(Mode::Shadow), Entry::Skins];
+
+impl Entry {
+    fn menu_item(self) -> MenuItem {
+        match self {
+            Entry::Play(mode) => mode.menu_item(),
+            Entry::Skins => MenuItem {
+                title: "SKINS",
+                blurb: "Block styles, boards and colours. Level up and beat shadows to unlock more.",
+            },
+        }
+    }
+}
+
+fn menu_index(entry: Entry) -> usize {
+    MENU.iter().position(|&e| e == entry).unwrap_or(0)
 }
 
 fn new_seed() -> u64 {
@@ -63,6 +88,8 @@ struct Session {
     beat: f32,
     /// Everything off the field: backdrop, shots, side callouts, meters.
     scene: Scene,
+    /// What the run earned, booked once it ends.
+    reward: Option<Reward>,
 }
 
 impl Session {
@@ -87,7 +114,19 @@ impl Session {
             shadow,
             beat: 0.0,
             scene: Scene::new(scene_fx, theme),
+            reward: None,
         }
+    }
+
+    /// The finished run, for progression.
+    fn run(&self) -> Run {
+        let s = &self.game.stats;
+        let kind = match (&self.battle, &self.versus) {
+            (Some(b), _) => RunKind::Battler { defeated: b.defeated },
+            (_, Some(vs)) => RunKind::Shadow { shadow: self.shadow, won: vs.player_won(), time: vs.time },
+            _ => RunKind::Classic { score: self.game.score },
+        };
+        Run { kind, lines: s.lines, attack: s.attack, pieces: s.pieces, apm: s.apm(), pps: s.pps() }
     }
 
     /// The run has ended: topped out, (Battler) out of time, or (Shadow) someone topped out.
@@ -173,6 +212,8 @@ enum Screen {
     Menu { selected: usize },
     /// Choosing a shadow for a 1v1.
     Select { selected: usize },
+    /// Browsing skins: the focused column and row.
+    Skins { col: usize, row: usize },
     Play(Box<Session>),
 }
 
@@ -184,19 +225,40 @@ pub struct App {
     scene_fx: bool,
     /// Menu element under the mouse this frame.
     hover: Option<MenuHit>,
+    /// Skins screen element under the mouse.
+    skins_hover: Option<SkinsHit>,
     last_mouse: Vec2,
+    /// XP, records, unlocks and the equipped skin (saved).
+    progress: Progress,
 }
 
 impl App {
     pub async fn new() -> Self {
+        let progress = crate::save::load();
+        skins::set_current(progress.skin);
         App {
             screen: Screen::Menu { selected: 0 },
             audio: Audio::load().await,
             motion: Motion::default(),
             scene_fx: true,
             hover: None,
+            skins_hover: None,
             last_mouse: Vec2::ZERO,
+            progress,
         }
+    }
+
+    /// Books a run that just ended (once) and saves.
+    fn book_run(&mut self) {
+        let Screen::Play(s) = &mut self.screen else {
+            return;
+        };
+        if s.reward.is_some() || !s.over() {
+            return;
+        }
+        let key = (s.mode == Mode::Shadow).then(|| SHADOWS[s.shadow.min(SHADOWS.len() - 1)].portrait);
+        s.reward = Some(self.progress.finish(&s.run(), key));
+        crate::save::store(&self.progress);
     }
 
     pub fn frame(&mut self, dt: f32) {
@@ -235,12 +297,12 @@ impl App {
 
     /// Mouse on the menu: hovering an option selects it (only when the mouse
     /// actually moved, so it doesn't fight the keyboard), clicking activates it.
-    /// Returns the mode to start, if an option was clicked.
-    fn menu_mouse(&mut self) -> Option<Mode> {
+    /// Returns the entry to open, if an option was clicked.
+    fn menu_mouse(&mut self) -> Option<Entry> {
         let mouse = Vec2::from(mouse_position());
         let moved = mouse != self.last_mouse;
         self.last_mouse = mouse;
-        self.hover = render::menu_hit(mouse, Mode::ALL.len());
+        self.hover = render::menu_hit(mouse, MENU.len());
         set_mouse_cursor(if self.hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
 
         if let (true, Some(MenuHit::Item(i)), Screen::Menu { selected }) = (moved, self.hover, &mut self.screen) {
@@ -250,7 +312,7 @@ impl App {
             return None;
         }
         match self.hover? {
-            MenuHit::Item(i) => Some(Mode::ALL[i]),
+            MenuHit::Item(i) => Some(MENU[i]),
             MenuHit::Motion => {
                 self.toggle_motion();
                 None
@@ -270,14 +332,14 @@ impl App {
     fn update(&mut self, dt: f32) -> Option<Screen> {
         match &mut self.screen {
             Screen::Menu { .. } => {
-                if let Some(mode) = self.menu_mouse() {
+                if let Some(entry) = self.menu_mouse() {
                     set_mouse_cursor(CursorIcon::Default);
-                    return Some(self.start(mode, 0));
+                    return Some(self.open(entry));
                 }
                 let Screen::Menu { selected } = &mut self.screen else {
                     unreachable!()
                 };
-                let count = Mode::ALL.len();
+                let count = MENU.len();
                 if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
                     *selected = (*selected + 1) % count;
                 }
@@ -285,16 +347,15 @@ impl App {
                     *selected = (*selected + count - 1) % count;
                 }
                 if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
-                    let mode = Mode::ALL[*selected];
-                    return Some(self.start(mode, 0));
+                    let entry = MENU[*selected];
+                    return Some(self.open(entry));
                 }
                 None
             }
             Screen::Select { .. } => self.select_update(),
+            Screen::Skins { .. } => self.skins_update(),
             Screen::Play(session) => {
-                let to_menu = Screen::Menu {
-                    selected: Mode::ALL.iter().position(|&m| m == session.mode).unwrap_or(0),
-                };
+                let to_menu = Screen::Menu { selected: menu_index(Entry::Play(session.mode)) };
                 if session.over() {
                     if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
                         return Some(Screen::Play(Box::new(Session::new(session.mode, self.motion, self.scene_fx, session.shadow))));
@@ -318,9 +379,67 @@ impl App {
                     session.input.reset();
                 }
                 session.update(dt, &self.audio);
+                self.book_run();
                 None
             }
         }
+    }
+
+    fn open(&self, entry: Entry) -> Screen {
+        match entry {
+            Entry::Play(mode) => self.start(mode, 0),
+            Entry::Skins => {
+                // Start on the equipped block style.
+                let row = render::skin_column(0).iter().position(|i| i.equipped_in(self.progress.skin)).unwrap_or(0);
+                Screen::Skins { col: 0, row }
+            }
+        }
+    }
+
+    /// The skins screen: arrows / mouse to browse, Enter / click to equip, Esc back.
+    fn skins_update(&mut self) -> Option<Screen> {
+        let mouse = Vec2::from(mouse_position());
+        let moved = mouse != self.last_mouse;
+        self.last_mouse = mouse;
+        self.skins_hover = render::skins_hit(mouse);
+        set_mouse_cursor(if self.skins_hover.is_some() { CursorIcon::Pointer } else { CursorIcon::Default });
+        let back = Screen::Menu { selected: menu_index(Entry::Skins) };
+        let Screen::Skins { col, row } = &mut self.screen else {
+            return None;
+        };
+        if let (true, Some(SkinsHit::Item { col: c, row: r })) = (moved, self.skins_hover) {
+            (*col, *row) = (c, r);
+        }
+        let columns = render::SKIN_COLUMNS.len();
+        let rows = |c: usize| render::skin_column(c).len();
+        if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::D) {
+            *col = (*col + 1) % columns;
+            *row = (*row).min(rows(*col) - 1);
+        }
+        if is_key_pressed(KeyCode::Left) || is_key_pressed(KeyCode::A) {
+            *col = (*col + columns - 1) % columns;
+            *row = (*row).min(rows(*col) - 1);
+        }
+        if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
+            *row = (*row + 1) % rows(*col);
+        }
+        if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
+            *row = (*row + rows(*col) - 1) % rows(*col);
+        }
+        let clicked = is_mouse_button_pressed(MouseButton::Left).then_some(self.skins_hover).flatten();
+        if clicked == Some(SkinsHit::Back) || is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+            set_mouse_cursor(CursorIcon::Default);
+            return Some(back);
+        }
+        let equip = matches!(clicked, Some(SkinsHit::Item { .. })) || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space);
+        if equip {
+            let item = render::skin_column(*col)[*row];
+            if self.progress.equip(item) {
+                skins::set_current(self.progress.skin);
+                crate::save::store(&self.progress);
+            }
+        }
+        None
     }
 
     /// Shadow mode opens the opponent list; the others start straight away.
@@ -358,8 +477,7 @@ impl App {
             return Some(Screen::Play(Box::new(Session::new(Mode::Shadow, self.motion, self.scene_fx, *selected))));
         }
         if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
-            let at = Mode::ALL.iter().position(|&m| m == Mode::Shadow).unwrap_or(0);
-            return Some(Screen::Menu { selected: at });
+            return Some(Screen::Menu { selected: menu_index(Entry::Play(Mode::Shadow)) });
         }
         None
     }
@@ -368,11 +486,12 @@ impl App {
         let sound_on = !self.audio.muted();
         match &self.screen {
             Screen::Menu { selected } => {
-                let items: Vec<MenuItem> = Mode::ALL.iter().map(|m| m.menu_item()).collect();
-                render::draw_menu(&items, *selected, self.hover, sound_on, self.motion, self.scene_fx);
+                let items: Vec<MenuItem> = MENU.iter().map(|e| e.menu_item()).collect();
+                render::draw_menu(&items, *selected, self.hover, sound_on, self.motion, self.scene_fx, &self.progress);
             }
-            Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.scene_fx),
-            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, s.battle.as_ref(), s.versus.as_ref()),
+            Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.scene_fx, &self.progress),
+            Screen::Skins { col, row } => render::draw_skins(&self.progress, *col, *row, self.skins_hover),
+            Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, s.battle.as_ref(), s.versus.as_ref(), s.reward.as_ref()),
         }
     }
 }

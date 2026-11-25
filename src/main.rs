@@ -12,8 +12,11 @@ mod game;
 mod input;
 mod monster_art;
 mod piece;
+mod progress;
 mod render;
 mod scene;
+mod save;
+mod skins;
 mod stats;
 mod versus;
 
