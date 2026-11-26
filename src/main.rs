@@ -11,6 +11,8 @@ mod fx;
 mod game;
 mod input;
 mod monster_art;
+mod net;
+mod online;
 mod piece;
 mod progress;
 mod render;

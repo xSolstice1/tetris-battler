@@ -15,7 +15,7 @@ cargo build --release --target wasm32-unknown-unknown
 
 rm -rf "$out"
 mkdir -p "$out"
-cp web/index.html web/mq_js_bundle.js "$out/"
+cp web/index.html web/mq_js_bundle.js web/net.js web/net-config.js "$out/"
 cp "$target_dir/wasm32-unknown-unknown/release/block-brawl.wasm" "$out/"
 
 echo "Built $out:"

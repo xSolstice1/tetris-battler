@@ -7,6 +7,7 @@
 //! Pure logic: the session feeds it the player's events and calls `update`.
 
 use crate::bot::{Bot, Profile};
+use crate::online::Msg;
 use crate::game::{Event, Game};
 
 /// Seconds of "3, 2, 1" before pieces fall.
@@ -55,7 +56,29 @@ pub struct Versus {
     pub since_sent: f32,
     pub last_sent: u32,
     events: Vec<VsEvent>,
+    /// Online: the opponent's name. Their field is mirrored from the network into `shadow`
+    /// (never ticked here) and garbage goes out through `outbox`.
+    pub remote: Option<String>,
+    outbox: Vec<Msg>,
 }
+
+/// The stand-in profile for an online opponent (colour, labels; no bot, no portrait).
+pub const REMOTE: Profile = Profile {
+    name: "OPPONENT",
+    blurb: "",
+    rank: "ONLINE",
+    ppm: (0.0, 0.0),
+    key_gap: 0.0,
+    sloppy: 0.0,
+    misdrop: 0.0,
+    stacks_for_quads: false,
+    holds: false,
+    lookahead: false,
+    spins: false,
+    pc_search: false,
+    color: 0x7fd8ff,
+    portrait: "",
+};
 
 /// Garbage a clear sends: its attack minus what went into cancelling.
 fn sent_by(event: &Event) -> u32 {
@@ -90,6 +113,55 @@ impl Versus {
             since_sent: f32::MAX,
             last_sent: 0,
             events: Vec::new(),
+            remote: None,
+            outbox: Vec::new(),
+        }
+    }
+
+    /// An online match against `name`: both fields from `seed`.
+    pub fn new_remote(name: String, seed: u64, player: &mut Game) -> Self {
+        Versus { remote: Some(name), ..Versus::new(REMOTE, seed, player) }
+    }
+
+    /// The opponent's name as shown.
+    pub fn name(&self) -> &str {
+        self.remote.as_deref().unwrap_or(self.profile.name)
+    }
+
+    pub fn online(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    /// Messages for the other side (online), oldest first.
+    pub fn take_outbox(&mut self) -> Vec<Msg> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Something arrived from the online opponent.
+    pub fn on_remote(&mut self, msg: &Msg, player: &mut Game) {
+        match msg {
+            Msg::Snap(snap) => snap.apply(&mut self.shadow),
+            Msg::Garbage(lines) if self.fighting() => {
+                self.received += lines;
+                player.receive_garbage(*lines);
+                self.since_sent = 0.0;
+                self.last_sent = *lines;
+                self.events.push(VsEvent::Received { lines: *lines });
+            }
+            Msg::Ko if !self.over() => {
+                self.shadow.game_over = true;
+                self.phase = Phase::Over { player_won: true };
+                self.events.push(VsEvent::Won);
+            }
+            _ => {}
+        }
+    }
+
+    /// The online opponent left mid-match: a win by forfeit.
+    pub fn opponent_left(&mut self) {
+        if !self.over() {
+            self.phase = Phase::Over { player_won: true };
+            self.events.push(VsEvent::Won);
         }
     }
 
@@ -118,7 +190,11 @@ impl Versus {
         let lines = sent_by(event);
         if lines > 0 {
             self.sent += lines;
-            self.shadow.receive_garbage(lines);
+            if self.online() {
+                self.outbox.push(Msg::Garbage(lines));
+            } else {
+                self.shadow.receive_garbage(lines);
+            }
             self.since_hit = 0.0;
             self.last_hit = lines;
             self.events.push(VsEvent::Sent { lines });
@@ -149,6 +225,15 @@ impl Versus {
             player.set_level(level);
         }
 
+        if self.online() {
+            // Their field is theirs to play: only our own top out is decided here.
+            if player.game_over {
+                self.phase = Phase::Over { player_won: false };
+                self.events.push(VsEvent::Lost);
+                self.outbox.push(Msg::Ko);
+            }
+            return;
+        }
         self.bot.update(dt, &mut self.shadow);
         self.shadow.tick(dt);
         for event in self.shadow.take_events() {
@@ -293,6 +378,55 @@ mod tests {
         assert_eq!(vs.phase, Phase::Over { player_won: false }, "the sharp shadow should win");
     }
 }
+#[cfg(test)]
+mod online_tests {
+    use super::*;
+    use crate::game::Action;
+    use crate::online::Snapshot;
+
+    fn fighting(name: &str) -> (Game, Versus) {
+        let mut player = Game::new(5);
+        let mut vs = Versus::new_remote(name.into(), 5, &mut player);
+        vs.update(COUNTDOWN + 0.1, &mut player);
+        (player, vs)
+    }
+
+    #[test]
+    fn online_garbage_goes_out_and_comes_in() {
+        let (mut player, mut vs) = fighting("Deon");
+        assert_eq!(vs.name(), "Deon");
+        let clear = crate::game::LineClear { rows: vec![36, 37, 38, 39], snapshot: vec![], t_spin: false, back_to_back: false, combo: 0, perfect_clear: false, attack: 4, cancelled: 0 };
+        vs.on_player_event(&Event::LinesCleared(clear));
+        assert_eq!(vs.take_outbox(), vec![Msg::Garbage(4)]);
+        assert_eq!(vs.shadow.pending_garbage(), 0, "the mirror isn't hit locally");
+        vs.on_remote(&Msg::Garbage(3), &mut player);
+        assert_eq!(player.pending_garbage(), 3);
+    }
+
+    #[test]
+    fn their_ko_is_our_win_and_ours_is_sent() {
+        let (mut player, mut vs) = fighting("Deon");
+        vs.on_remote(&Msg::Ko, &mut player);
+        assert!(vs.player_won());
+        let (mut player, mut vs) = fighting("Deon");
+        player.game_over = true;
+        vs.update(0.1, &mut player);
+        assert_eq!(vs.phase, Phase::Over { player_won: false });
+        assert!(vs.take_outbox().contains(&Msg::Ko));
+    }
+
+    #[test]
+    fn snapshots_draw_their_field_and_leaving_forfeits() {
+        let (mut player, mut vs) = fighting("Deon");
+        let mut theirs = Game::new(5);
+        theirs.apply(Action::HardDrop);
+        vs.on_remote(&Msg::Snap(Snapshot::of(&theirs)), &mut player);
+        assert_eq!(vs.shadow.stats.pieces, 1);
+        vs.opponent_left();
+        assert!(vs.player_won());
+    }
+}
+
 #[cfg(test)]
 mod duel {
     use super::*;

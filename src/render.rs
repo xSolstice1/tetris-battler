@@ -1307,13 +1307,15 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
     let muted = hex(ui::TEXT2);
     let (bw, bh) = (WIDTH as f32 * OPP_CELL, VISIBLE_ROWS as f32 * OPP_CELL);
 
-    ui::section(v, PANEL_X, BOARD_Y - 10.0, MONSTER_PANEL_W, "SHADOW", muted);
+    ui::section(v, PANEL_X, BOARD_Y - 10.0, MONSTER_PANEL_W, if vs.online() { "OPPONENT" } else { "SHADOW" }, muted);
     let face = 62.0;
     draw_reacting_portrait(v, vs, OPP_X, BOARD_Y + 4.0, face, still);
-    let tx = OPP_X + face + 14.0;
-    text_mixed_shadow(v, p.name, tx, BOARD_Y + 32.0, if p.name.chars().count() > 8 { 30.0 } else { 40.0 }, accent);
+    let tx = if vs.online() { OPP_X } else { OPP_X + face + 14.0 };
+    let name = vs.name();
+    text_mixed_shadow(v, name, tx, BOARD_Y + 32.0, if name.chars().count() > 8 { 30.0 } else { 40.0 }, accent);
     let w = ui::pill(v, tx, BOARD_Y + 52.0, p.rank, 11.0, accent, ui::Pill::Soft);
-    v.text(&format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1), tx + w + 8.0, ui::baseline(BOARD_Y + 52.0, 15.0), 15.0, hex(ui::TEXT3));
+    let pace = if vs.online() { "LIVE".to_owned() } else { format!("{:.0}-{:.0} PPM", p.ppm.0, p.ppm.1) };
+    v.text(&pace, tx + w + 8.0, ui::baseline(BOARD_Y + 52.0, 15.0), 15.0, hex(ui::TEXT3));
 
     // Field.
     let lost = vs.player_won();
@@ -1501,7 +1503,7 @@ fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     ui::radial(v, cx, ny - size * 0.35, size * 0.9, size * 0.6, with_alpha(accent, 0.18 * (0.4 + 0.6 * k)), with_alpha(accent, 0.0));
     ui::text_shadow_centered(v, &n.to_string(), cx, ny, size, with_alpha(WHITE, 0.4 + 0.6 * k));
     // "VS NAME" on a banner.
-    let label = format!("VS {}", vs.profile.name);
+    let label = format!("VS {}", vs.name());
     let lw = v.measure_mixed(&label, 26.0);
     let by = BOARD_Y + BOARD_H / 2.0 + 142.0;
     let banner = Rect::new(cx - lw / 2.0 - 22.0, by - 20.0, lw + 44.0, 40.0);
@@ -1535,7 +1537,7 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats, reward: O
     ui::stroke(v, fr, 4.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.3), 0.9));
     ui::radial(v, cx, BOARD_Y + 124.0, 150.0, 40.0, with_alpha(color, 0.18), with_alpha(color, 0.0));
     ui::text_shadow_centered(v, title, cx, BOARD_Y + 142.0, 52.0, color);
-    let vs_line = format!("vs {}", vs.profile.name);
+    let vs_line = format!("vs {}", vs.name());
     let rank_w = ui::pill_w(v, vs.profile.rank, 11.0);
     let line_w = v.measure_mixed(&vs_line, 20.0) + 8.0 + rank_w;
     let lx = cx - line_w / 2.0;
@@ -1549,9 +1551,9 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats, reward: O
     let (left, right) = (card.x + 18.0, card.right() - 18.0);
     let top = BOARD_Y + 214.0;
     ui::caps(v, "YOU", left, top, 13.0, WHITE, 2.0);
-    let nw = v.measure_mixed(vs.profile.name, 16.0);
+    let nw = v.measure_mixed(vs.name(), 16.0);
     let name_size = if nw > 200.0 { 16.0 * 200.0 / nw } else { 16.0 };
-    v.text_mixed_right(vs.profile.name, right, top, name_size, accent);
+    v.text_mixed_right(vs.name(), right, top, name_size, accent);
     let rows = [
         ("PPS", stats::fmt_rate(mine.pps(), 2), stats::fmt_rate(theirs.pps(), 2), mine.pps().unwrap_or(0.0), theirs.pps().unwrap_or(0.0)),
         ("APM", stats::fmt_rate(mine.apm(), 1), stats::fmt_rate(theirs.apm(), 1), mine.apm().unwrap_or(0.0), theirs.apm().unwrap_or(0.0)),
@@ -1681,8 +1683,8 @@ pub struct MenuItem {
 
 // Menu layout, shared by drawing and mouse hit-testing (virtual coordinates).
 const MENU_ITEM_W: f32 = 420.0;
-const MENU_ITEM_H: f32 = 56.0;
-const MENU_ITEM_GAP: f32 = 14.0;
+const MENU_ITEM_H: f32 = 50.0;
+const MENU_ITEM_GAP: f32 = 12.0;
 const MENU_TOP: f32 = 270.0;
 const TOGGLE_W: f32 = 200.0;
 const TOGGLE_H: f32 = 40.0;
@@ -2073,7 +2075,7 @@ mod tests {
 
     #[test]
     fn menu_targets_never_overlap_and_fit_the_canvas() {
-        for items in 1..=4 {
+        for items in 1..=5 {
             let mut rects: Vec<Rect> = (0..items).map(menu_item_rect).collect();
             rects.push(menu_toggle_rect(items, MenuHit::Settings));
             rects.push(menu_toggle_rect(items, MenuHit::Sound));
@@ -2482,4 +2484,76 @@ fn back_button(v: &View, r: Rect, label: &str, hovered: bool) {
 /// `c` nudged toward `toward`, keeping its alpha.
 fn a_mix(c: Color, toward: Color, t: f32) -> Color {
     with_alpha(mix_colors(c, toward, t), c.a)
+}
+
+
+// ───────────── Online lobby ─────────────
+
+fn online_button_rect(i: usize) -> Rect {
+    Rect::new(CLASSIC_W / 2.0 - 160.0, 300.0 + i as f32 * 74.0, 320.0, 58.0)
+}
+
+/// The lobby's Create / Join buttons under `screen_pos`, if any.
+pub fn online_hit(screen_pos: Vec2) -> Option<usize> {
+    let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
+    (0..2).find(|&i| online_button_rect(i).contains(p))
+}
+
+/// The online lobby: create or join a room, type a code, or wait in a room with its code.
+pub fn draw_online(lobby: &crate::app::Lobby, me: &str, progress: &Progress) {
+    use crate::app::Lobby;
+    clear_background(hex(0x0b0d14));
+    let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
+    scene::draw_menu_backdrop(&v, CLASSIC_W, Theme::classic(), progress.settings.scene);
+    let cx = CLASSIC_W / 2.0;
+    ui::text_shadow_centered(&v, "ONLINE 1V1", cx, 150.0, ui::TITLE, WHITE);
+    ui::caps_centered(&v, &format!("PLAYING AS {me}"), cx, 186.0, ui::CAPS, hex(ui::TEXT3), 2.0);
+    let mouse = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(Vec2::from(mouse_position()));
+    match lobby {
+        Lobby::Choose { focus } => {
+            for (i, (label, hint)) in [("CREATE ROOM", "get a code to share"), ("JOIN ROOM", "type a friend's code")].iter().enumerate() {
+                let r = online_button_rect(i);
+                let st = ui::State::new(*focus == i, r.contains(mouse));
+                ui::button(&v, r, label, 24.0, st, hex(ui::GOLD));
+                v.text_centered(hint, cx, r.bottom() + 16.0, 14.0, hex(ui::TEXT3));
+            }
+            v.text_centered("Both players need this page open. It's a live 1v1: same pieces, garbage both ways.", cx, 480.0, 16.0, hex(ui::TEXT2));
+        }
+        Lobby::Typing { code } => {
+            let card = Rect::new(cx - 200.0, 260.0, 400.0, 220.0);
+            ui::panel(&v, card, &ui::Panel::card());
+            ui::caps_centered(&v, "ENTER THE ROOM CODE", cx, card.y + 40.0, ui::CAPS, hex(ui::TEXT2), 2.0);
+            for i in 0..4 {
+                let b = Rect::new(cx - 2.0 * 66.0 + i as f32 * 66.0 + 5.0, card.y + 70.0, 56.0, 72.0);
+                ui::panel(&v, b, &ui::Panel::well());
+                let ch = code.chars().nth(i).map(|c| c.to_string());
+                if code.len() == i {
+                    ui::stroke(&v, b, 7.0, 2.0, hex(ui::GOLD));
+                }
+                if let Some(ch) = ch {
+                    v.text_centered(&ch, b.x + b.w / 2.0, b.y + 50.0, 44.0, WHITE);
+                }
+            }
+            let hint = if code.len() == 4 { "Enter to join   ·   Esc back" } else { "type the 4 letters   ·   Esc back" };
+            v.text_centered(hint, cx, card.bottom() - 24.0, 16.0, hex(ui::TEXT3));
+        }
+        Lobby::Room { code, opponent, problem, .. } => {
+            let card = Rect::new(cx - 220.0, 240.0, 440.0, 260.0);
+            ui::panel(&v, card, &ui::Panel::card());
+            ui::caps_centered(&v, "ROOM CODE", cx, card.y + 38.0, ui::CAPS, hex(ui::TEXT2), 2.0);
+            let spaced: String = code.chars().flat_map(|c| [c, ' ']).collect();
+            ui::text_shadow_centered(&v, spaced.trim_end(), cx, card.y + 104.0, 64.0, hex(ui::GOLD));
+            v.text_centered("share this code with your friend", cx, card.y + 136.0, 16.0, hex(ui::TEXT3));
+            let (line, color) = match (problem, opponent, crate::net::status()) {
+                (Some(p), _, _) => (p.to_string(), hex(ui::PINK)),
+                (_, Some(name), _) => (format!("{name} is here. Starting..."), hex(ui::GREEN)),
+                (_, None, crate::net::Status::Joined) => ("Waiting for your opponent...".to_owned(), hex(ui::TEXT2)),
+                _ => ("Connecting...".to_owned(), hex(ui::TEXT2)),
+            };
+            // A quiet pulse while waiting.
+            let pulse = 0.6 + 0.4 * (get_time() as f32 * 3.0).sin().abs();
+            v.text_mixed(&line, cx - v.measure_mixed(&line, 20.0) / 2.0, card.y + 194.0, 20.0, Color { a: if opponent.is_some() || problem.is_some() { 1.0 } else { pulse }, ..color });
+            v.text_centered("Esc leave", cx, card.bottom() - 20.0, 15.0, hex(ui::TEXT3));
+        }
+    }
 }

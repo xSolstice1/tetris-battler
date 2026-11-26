@@ -24,6 +24,10 @@
        declaring it, which throws under the bundle's "use strict". -->
   <script>var register_plugin;</script>
   <script src="mq_js_bundle.js"></script>
+  <!-- Online play: Supabase Realtime (src/net.rs, net.js). -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="net-config.js"></script>
+  <script src="net.js"></script>
   <script>
     // Saved progress (see src/save.rs): one localStorage entry, read in two steps
     // (length, then copy into a buffer the game allocated).

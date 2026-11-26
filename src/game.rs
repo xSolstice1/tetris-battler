@@ -300,6 +300,14 @@ impl Game {
         self.events.push(Event::GarbageIncoming { lines });
     }
 
+    /// Shows `lines` of garbage waiting (a remote player's mirror; nothing will rise).
+    pub fn mirror_pending(&mut self, lines: u32) {
+        self.pending_garbage.clear();
+        if lines > 0 {
+            self.pending_garbage.push_back(Garbage { lines, hole: 0 });
+        }
+    }
+
     /// Total garbage lines waiting to rise.
     pub fn pending_garbage(&self) -> u32 {
         self.pending_garbage.iter().map(|g| g.lines).sum()

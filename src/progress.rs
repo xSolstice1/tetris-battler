@@ -44,6 +44,8 @@ pub enum RunKind {
     Battler { defeated: u32 },
     /// `shadow` is the index into `bot::SHADOWS`; `time` the match length.
     Shadow { shadow: usize, won: bool, time: f32 },
+    /// An online 1v1 against another player.
+    Online { won: bool },
 }
 
 /// The numbers of a finished run that progression cares about.
@@ -101,6 +103,8 @@ fn run_xp(run: &Run) -> u32 {
         RunKind::Battler { defeated } => defeated * 25,
         RunKind::Shadow { shadow, won: true, .. } => 60 + 40 * shadow as u32,
         RunKind::Shadow { won: false, .. } => 10,
+        RunKind::Online { won: true } => 120,
+        RunKind::Online { won: false } => 20,
     };
     base + mode
 }
@@ -184,6 +188,8 @@ impl Progress {
                     self.battle_best = defeated;
                 }
             }
+            // Online results only earn XP (no per-player records yet).
+            RunKind::Online { .. } => {}
             RunKind::Shadow { won, time, .. } => {
                 let key = shadow_key.unwrap_or("unknown").to_owned();
                 let r = self.records.entry(key).or_default();

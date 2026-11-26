@@ -39,6 +39,23 @@ const I_CCW: [[(i32, i32); 5]; 4] = [
 ];
 
 impl PieceKind {
+    /// One-letter name (I O T S Z J L), for the network.
+    pub fn letter(self) -> char {
+        match self {
+            PieceKind::I => 'I',
+            PieceKind::O => 'O',
+            PieceKind::T => 'T',
+            PieceKind::S => 'S',
+            PieceKind::Z => 'Z',
+            PieceKind::J => 'J',
+            PieceKind::L => 'L',
+        }
+    }
+
+    pub fn from_letter(c: char) -> Option<PieceKind> {
+        PieceKind::ALL.into_iter().find(|k| k.letter() == c)
+    }
+
     pub const ALL: [PieceKind; 7] = [
         PieceKind::I,
         PieceKind::O,

@@ -102,6 +102,11 @@ impl Board {
         fits
     }
 
+    /// Writes one cell (mirroring a remote player's field).
+    pub fn put(&mut self, x: usize, y: usize, cell: Option<Cell>) {
+        self.rows[y][x] = cell;
+    }
+
     /// Direct cell write for tests and debug board presets.
     #[cfg(any(test, debug_assertions))]
     pub fn set(&mut self, x: usize, y: usize, kind: PieceKind) {

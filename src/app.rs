@@ -8,11 +8,12 @@ use macroquad::prelude::*;
 use crate::audio::{Audio, Mood, Track};
 use crate::battle::{Battle, BattleEvent};
 use crate::bot::SHADOWS;
+use crate::online::{Msg, Snapshot};
 use crate::versus::{Versus, VsEvent};
 use crate::fx::{Effects, Fx};
 use crate::settings::{Bind, Settings};
 use crate::settings_ui::{self, Extra, Kind};
-use crate::game::Game;
+use crate::game::{Event, Game};
 use crate::input::Input;
 use crate::progress::{Progress, Reward, Run, RunKind};
 use crate::render::{self, MenuHit, MenuItem, SkinsHit};
@@ -25,6 +26,8 @@ pub enum Mode {
     Battler,
     /// A 1v1 against a shadow (index into `bot::SHADOWS`).
     Shadow,
+    /// A 1v1 against another player, through a room (see `online.rs`).
+    Online,
 }
 
 impl Mode {
@@ -37,6 +40,10 @@ impl Mode {
             Mode::Battler => MenuItem {
                 title: "BATTLER",
                 blurb: "Beat a gauntlet of monsters before time runs out. They hit back with garbage.",
+            },
+            Mode::Online => MenuItem {
+                title: "ONLINE 1V1",
+                blurb: "Battle a friend live: create a room, share the code.",
             },
             Mode::Shadow => MenuItem {
                 title: "SHADOW 1V1",
@@ -55,7 +62,7 @@ enum Entry {
     Settings,
 }
 
-const MENU: [Entry; 4] = [Entry::Play(Mode::Classic), Entry::Play(Mode::Battler), Entry::Play(Mode::Shadow), Entry::Skins];
+const MENU: [Entry; 5] = [Entry::Play(Mode::Classic), Entry::Play(Mode::Battler), Entry::Play(Mode::Shadow), Entry::Play(Mode::Online), Entry::Skins];
 
 impl Entry {
     fn menu_item(self) -> MenuItem {
@@ -98,6 +105,13 @@ struct Session {
     scene: Scene,
     /// What the run earned, booked once it ends.
     reward: Option<Reward>,
+    /// Online: the room, when our field last went out, whether it changed since, and
+    /// who's ready for a rematch.
+    room: Option<String>,
+    snap_timer: f32,
+    net_dirty: bool,
+    rematch_me: bool,
+    rematch_them: bool,
 }
 
 impl Session {
@@ -123,6 +137,73 @@ impl Session {
             beat: 0.0,
             scene: Scene::new(opts.scene, theme),
             reward: None,
+            room: None,
+            snap_timer: 0.0,
+            net_dirty: true,
+            rematch_me: false,
+            rematch_them: false,
+        }
+    }
+
+    /// An online match in `room` against `opponent`, both fields from `seed`.
+    fn new_online(seed: u64, opponent: String, room: String, opts: &Settings) -> Self {
+        let mut game = Game::new(seed);
+        let versus = Versus::new_remote(opponent, seed, &mut game);
+        Session {
+            mode: Mode::Online,
+            game,
+            fx: Fx::new(opts.effects),
+            input: Input::new(opts),
+            paused: false,
+            battle: None,
+            scene: Scene::new(opts.scene, Theme::shadow(&versus.profile)),
+            versus: Some(versus),
+            shadow: 0,
+            beat: 0.0,
+            reward: None,
+            room: Some(room),
+            snap_timer: 0.0,
+            net_dirty: true,
+            rematch_me: false,
+            rematch_them: false,
+        }
+    }
+
+    /// Online: handle what arrived, send what's due (garbage, KO, our field).
+    fn sync(&mut self, dt: f32) {
+        if self.room.is_none() {
+            return;
+        }
+        while let Some(text) = crate::net::poll() {
+            let Some(msg) = Msg::decode(&text) else {
+                continue;
+            };
+            match msg {
+                Msg::Rematch => self.rematch_them = true,
+                Msg::Start { .. } | Msg::Hello { .. } => {}
+                m => {
+                    if let Some(vs) = &mut self.versus {
+                        vs.on_remote(&m, &mut self.game);
+                    }
+                }
+            }
+        }
+        if let Some(vs) = &mut self.versus {
+            // Someone left the room mid-match: they forfeit.
+            if crate::net::peers() < 2 && vs.fighting() {
+                vs.opponent_left();
+            }
+            for m in vs.take_outbox() {
+                crate::net::send(&m.encode());
+            }
+        }
+        // Our field: on every change (locks, holds, garbage), and twice a second anyway
+        // so their view of our falling piece keeps up.
+        self.snap_timer -= dt;
+        if self.net_dirty || self.snap_timer <= 0.0 {
+            crate::net::send(&Msg::Snap(Snapshot::of(&self.game)).encode());
+            self.net_dirty = false;
+            self.snap_timer = 0.5;
         }
     }
 
@@ -131,6 +212,7 @@ impl Session {
         let s = &self.game.stats;
         let kind = match (&self.battle, &self.versus) {
             (Some(b), _) => RunKind::Battler { defeated: b.defeated },
+            (_, Some(vs)) if vs.online() => RunKind::Online { won: vs.player_won() },
             (_, Some(vs)) => RunKind::Shadow { shadow: self.shadow, won: vs.player_won(), time: vs.time },
             _ => RunKind::Classic { score: self.game.score },
         };
@@ -193,6 +275,9 @@ impl Session {
             if let Some(vs) = &mut self.versus {
                 vs.on_player_event(&event);
             }
+            if matches!(event, Event::Locked { .. } | Event::Held | Event::GarbageRose { .. } | Event::GameOver) {
+                self.net_dirty = true;
+            }
             self.fx.handle(&event);
         }
         if let Some(vs) = &mut self.versus {
@@ -244,6 +329,19 @@ enum Screen {
     /// The settings screen: tab, focused row, focused key slot (controls), the action
     /// waiting for a key, and where Esc goes back to (a paused run, or the menu).
     Settings { tab: usize, row: usize, slot: usize, rebinding: Option<(Bind, usize)>, back: Option<Box<Session>> },
+    /// Finding an online match.
+    Online(Lobby),
+}
+
+/// The online lobby's steps.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Lobby {
+    /// Create a room, join one, or back (focused option).
+    Choose { focus: usize },
+    /// Typing a friend's room code.
+    Typing { code: String },
+    /// In a room, waiting for the other player (and their name).
+    Room { code: String, opponent: Option<String>, hello_in: f32, problem: Option<&'static str> },
 }
 
 /// A settings screen opened from the paused run (filled in once the run is moved over).
@@ -260,6 +358,8 @@ pub struct App {
     settings_hover: Option<render::SettingsHit>,
     /// The run to put into the settings screen opened from pause.
     pending_back: bool,
+    /// This player's name online.
+    player_name: String,
     /// Menu element under the mouse this frame.
     hover: Option<MenuHit>,
     /// Skins screen element under the mouse.
@@ -279,6 +379,7 @@ impl App {
             fullscreen: false,
             settings_hover: None,
             pending_back: false,
+            player_name: format!("PLAYER {}", 100 + (new_seed() % 900)),
             hover: None,
             skins_hover: None,
             last_mouse: Vec2::ZERO,
@@ -295,6 +396,7 @@ impl App {
             return;
         }
         let key = (s.mode == Mode::Shadow).then(|| SHADOWS[s.shadow.min(SHADOWS.len() - 1)].portrait);
+        // (Online matches only earn XP; they keep no per-opponent record.)
         s.reward = Some(self.progress.finish(&s.run(), key));
         crate::save::store(&self.progress);
     }
@@ -322,7 +424,7 @@ impl App {
                 _ => None,
             },
             Screen::Select { selected } => Some(Track::shadow(selected, SHADOWS.len())),
-            Screen::Play(_) | Screen::Skins { .. } | Screen::Settings { .. } => None,
+            Screen::Play(_) | Screen::Skins { .. } | Screen::Settings { .. } | Screen::Online(_) => None,
         };
         if let Some(track) = next {
             self.audio.prefetch_music(track);
@@ -339,6 +441,7 @@ impl App {
             Mode::Classic => Track::Classic,
             Mode::Battler => Track::Battler,
             Mode::Shadow => Track::shadow(s.shadow, SHADOWS.len()),
+            Mode::Online => Track::shadow(5, SHADOWS.len()),
         };
         Mood::play(track, &s.game, s.battle.as_ref(), s.versus.as_ref(), s.paused)
     }
@@ -441,6 +544,40 @@ impl App {
             Screen::Select { .. } => self.select_update(),
             Screen::Skins { .. } => self.skins_update(),
             Screen::Settings { .. } => self.settings_update(),
+            Screen::Play(session) if session.room.is_some() => {
+                let room = session.room.clone().unwrap_or_default();
+                session.update(dt, &self.audio, &self.progress.settings);
+                session.sync(dt);
+                self.book_run();
+                let Screen::Play(session) = &mut self.screen else {
+                    return None;
+                };
+                if session.over() {
+                    // Rematch: both press Enter; the host then starts a fresh match.
+                    if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
+                        session.rematch_me = true;
+                        crate::net::send(&Msg::Rematch.encode());
+                    }
+                    if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+                        crate::net::leave();
+                        return Some(Screen::Menu { selected: menu_index(Entry::Play(Mode::Online)) });
+                    }
+                    let name = session.versus.as_ref().map(|v| v.name().to_owned()).unwrap_or_default();
+                    if session.rematch_me && session.rematch_them && crate::net::is_host() {
+                        let seed = new_seed();
+                        crate::net::send(&Msg::Start { seed }.encode());
+                        return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
+                    }
+                    // The guest starts when the host's start arrives (it's left in the queue).
+                    if session.rematch_me && !crate::net::is_host() {
+                        if let Some(seed) = take_start() {
+                            return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
+                        }
+                    }
+                }
+                None
+            }
+            Screen::Online(_) => self.online_update(dt),
             Screen::Play(session) => {
                 let to_menu = Screen::Menu { selected: menu_index(Entry::Play(session.mode)) };
                 if session.over() {
@@ -537,6 +674,8 @@ impl App {
     fn start(&self, mode: Mode, shadow: usize) -> Screen {
         if mode == Mode::Shadow {
             Screen::Select { selected: shadow }
+        } else if mode == Mode::Online {
+            Screen::Online(Lobby::Choose { focus: 0 })
         } else {
             Screen::Play(Box::new(Session::new(mode, &self.progress.settings, 0)))
         }
@@ -571,6 +710,113 @@ impl App {
             return Some(Screen::Menu { selected: menu_index(Entry::Play(Mode::Shadow)) });
         }
         None
+    }
+
+    /// The online lobby: create a room (a code to share) or type a friend's code, then wait
+    /// in the room until the other player is there; the host starts the match.
+    fn online_update(&mut self, dt: f32) -> Option<Screen> {
+        let Screen::Online(lobby) = &mut self.screen else {
+            return None;
+        };
+        let back = Screen::Menu { selected: menu_index(Entry::Play(Mode::Online)) };
+        match lobby {
+            Lobby::Choose { focus } => {
+                if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::Up) {
+                    *focus = 1 - *focus;
+                }
+                if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+                    return Some(back);
+                }
+                let hit = render::online_hit(Vec2::from(mouse_position()));
+                if let Some(i) = hit {
+                    *focus = i;
+                }
+                let pick = (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) || (is_mouse_button_pressed(MouseButton::Left) && hit.is_some())).then_some(*focus);
+                match pick {
+                    Some(0) => {
+                        let code = crate::online::room_code(new_seed());
+                        crate::net::join(&code);
+                        *lobby = Lobby::Room { code, opponent: None, hello_in: 0.0, problem: None };
+                    }
+                    Some(_) => *lobby = Lobby::Typing { code: String::new() },
+                    None => {}
+                }
+                None
+            }
+            Lobby::Typing { code } => {
+                while let Some(ch) = get_char_pressed() {
+                    *code = crate::online::clean_code(&format!("{code}{ch}"));
+                }
+                if is_key_pressed(KeyCode::Backspace) {
+                    code.pop();
+                }
+                if is_key_pressed(KeyCode::Escape) {
+                    *lobby = Lobby::Choose { focus: 1 };
+                } else if is_key_pressed(KeyCode::Enter) && code.len() == 4 {
+                    let code = code.clone();
+                    crate::net::join(&code);
+                    *lobby = Lobby::Room { code, opponent: None, hello_in: 0.0, problem: None };
+                }
+                None
+            }
+            Lobby::Room { code, opponent, hello_in, problem } => {
+                if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+                    crate::net::leave();
+                    return Some(back);
+                }
+                match crate::net::status() {
+                    crate::net::Status::Unavailable => *problem = Some("Online play isn't set up on this build."),
+                    crate::net::Status::Error => *problem = Some("Couldn't reach the server. Esc and try again."),
+                    _ => {}
+                }
+                let here = crate::net::peers();
+                if here > 2 {
+                    *problem = Some("That room is full. Esc and make a new one.");
+                }
+                // Say hello (and keep saying it until we know who's there).
+                *hello_in -= dt;
+                if crate::net::status() == crate::net::Status::Joined && here >= 2 && opponent.is_none() && *hello_in <= 0.0 {
+                    let name = self.player_name.clone();
+                    crate::net::send(&Msg::Hello { name, protocol: crate::online::PROTOCOL }.encode());
+                    *hello_in = 1.0;
+                }
+                let mut start = None;
+                while let Some(text) = crate::net::poll() {
+                    match Msg::decode(&text) {
+                        Some(Msg::Hello { name, protocol }) => {
+                            if protocol != crate::online::PROTOCOL {
+                                *problem = Some("Your friend has a different version. Both reload the page.");
+                            } else {
+                                if opponent.is_none() {
+                                    // Make sure they know us too.
+                                    let me = self.player_name.clone();
+                                    crate::net::send(&Msg::Hello { name: me, protocol: crate::online::PROTOCOL }.encode());
+                                }
+                                *opponent = Some(name);
+                            }
+                        }
+                        Some(Msg::Start { seed }) => start = Some(seed),
+                        _ => {}
+                    }
+                }
+                if problem.is_some() {
+                    return None;
+                }
+                let Some(name) = opponent.clone() else {
+                    return None;
+                };
+                let room = code.clone();
+                if crate::net::is_host() {
+                    let seed = new_seed();
+                    crate::net::send(&Msg::Start { seed }.encode());
+                    return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
+                }
+                if let Some(seed) = start {
+                    return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
+                }
+                None
+            }
+        }
     }
 
     fn extra(&self) -> Extra {
@@ -722,6 +968,7 @@ impl App {
                 render::draw_menu(&items, *selected, self.hover, sound_on, self.progress.settings.scene, &self.progress);
             }
             Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.progress.settings.scene, &self.progress),
+            Screen::Online(lobby) => render::draw_online(lobby, &self.player_name, &self.progress),
             Screen::Settings { tab, row, slot, rebinding, back } => {
                 render::draw_settings(&self.progress.settings, self.extra(), *tab, *row, *slot, *rebinding, self.settings_hover, back.is_some())
             }
@@ -729,4 +976,15 @@ impl App {
             Screen::Play(s) => render::draw(&s.game, s.paused, &s.fx, &s.scene, sound_on, self.audio.music_on(), &self.progress.settings, s.battle.as_ref(), s.versus.as_ref(), s.reward.as_ref()),
         }
     }
+}
+
+/// A start message waiting in the network queue (the guest's rematch), if any. Other
+/// messages read while looking are dropped: between matches only the start matters.
+fn take_start() -> Option<u64> {
+    while let Some(text) = crate::net::poll() {
+        if let Some(Msg::Start { seed }) = Msg::decode(&text) {
+            return Some(seed);
+        }
+    }
+    None
 }
