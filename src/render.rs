@@ -1495,10 +1495,13 @@ fn draw_countdown(v: &View, vs: &Versus, left: f32, still: bool) {
     let accent = hex(vs.profile.color);
     let fy = BOARD_Y + 70.0;
     let frame = Rect::new(cx - face / 2.0 - 3.0, fy - 3.0, face + 6.0, face + 6.0);
-    ui::glow(v, frame, 6.0, 18.0, with_alpha(accent, 0.3));
-    ui::shadow(v, frame, 6.0, 14.0, 6.0, 0.5);
-    draw_portrait(v, &vs.profile, cx - face / 2.0, fy, face, WHITE);
-    ui::stroke(v, frame, 6.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.4), 0.9));
+    // Online opponents have no portrait: just their name below.
+    if !vs.online() {
+        ui::glow(v, frame, 6.0, 18.0, with_alpha(accent, 0.3));
+        ui::shadow(v, frame, 6.0, 14.0, 6.0, 0.5);
+        draw_portrait(v, &vs.profile, cx - face / 2.0, fy, face, WHITE);
+        ui::stroke(v, frame, 6.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.4), 0.9));
+    }
     let ny = BOARD_Y + BOARD_H / 2.0 + 40.0 + size * 0.3;
     ui::radial(v, cx, ny - size * 0.35, size * 0.9, size * 0.6, with_alpha(accent, 0.18 * (0.4 + 0.6 * k)), with_alpha(accent, 0.0));
     ui::text_shadow_centered(v, &n.to_string(), cx, ny, size, with_alpha(WHITE, 0.4 + 0.6 * k));
@@ -1532,9 +1535,11 @@ fn draw_versus_results(v: &View, vs: &Versus, won: bool, mine: &Stats, reward: O
     let accent = hex(vs.profile.color);
     let face = 64.0;
     let fr = Rect::new(cx - face / 2.0 - 2.0, BOARD_Y + 26.0, face + 4.0, face + 4.0);
-    ui::shadow(v, fr, 6.0, 10.0, 4.0, 0.5);
-    draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 28.0, face, if won { Color::new(0.5, 0.5, 0.55, 1.0) } else { WHITE });
-    ui::stroke(v, fr, 4.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.3), 0.9));
+    if !vs.online() {
+        ui::shadow(v, fr, 6.0, 10.0, 4.0, 0.5);
+        draw_portrait(v, &vs.profile, cx - face / 2.0, BOARD_Y + 28.0, face, if won { Color::new(0.5, 0.5, 0.55, 1.0) } else { WHITE });
+        ui::stroke(v, fr, 4.0, 1.5, with_alpha(mix_colors(accent, WHITE, 0.3), 0.9));
+    }
     ui::radial(v, cx, BOARD_Y + 124.0, 150.0, 40.0, with_alpha(color, 0.18), with_alpha(color, 0.0));
     ui::text_shadow_centered(v, title, cx, BOARD_Y + 142.0, 52.0, color);
     let vs_line = format!("vs {}", vs.name());

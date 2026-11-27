@@ -25,6 +25,7 @@
       const env = importObject.env;
       env.bb_net_join = function (p, l) {
         const room = text(p, l);
+        console.log("bb_net join " + room);
         leave();
         if (!ensure()) return;
         status = 1;
@@ -32,6 +33,7 @@
         channel.on("broadcast", { event: "m" }, (m) => { if (m.payload && typeof m.payload.t === "string") inbox.push(m.payload.t); });
         channel.on("presence", { event: "sync" }, () => { members = Object.keys(channel.presenceState()).sort(); });
         channel.subscribe(async (s) => {
+          console.log("bb_net " + s);
           if (s === "SUBSCRIBED") { status = 2; try { await channel.track({ at: Date.now() }); } catch (e) { console.warn(e); } }
           else if (s === "CHANNEL_ERROR" || s === "TIMED_OUT") status = 3;
         });

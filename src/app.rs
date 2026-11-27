@@ -112,6 +112,8 @@ struct Session {
     net_dirty: bool,
     rematch_me: bool,
     rematch_them: bool,
+    /// The host's start for the next match (a rematch), once it arrives.
+    next_start: Option<u64>,
 }
 
 impl Session {
@@ -142,6 +144,7 @@ impl Session {
             net_dirty: true,
             rematch_me: false,
             rematch_them: false,
+            next_start: None,
         }
     }
 
@@ -166,6 +169,7 @@ impl Session {
             net_dirty: true,
             rematch_me: false,
             rematch_them: false,
+            next_start: None,
         }
     }
 
@@ -180,7 +184,8 @@ impl Session {
             };
             match msg {
                 Msg::Rematch => self.rematch_them = true,
-                Msg::Start { .. } | Msg::Hello { .. } => {}
+                Msg::Start { seed } => self.next_start = Some(seed),
+                Msg::Hello { .. } => {}
                 m => {
                     if let Some(vs) = &mut self.versus {
                         vs.on_remote(&m, &mut self.game);
@@ -568,9 +573,9 @@ impl App {
                         crate::net::send(&Msg::Start { seed }.encode());
                         return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
                     }
-                    // The guest starts when the host's start arrives (it's left in the queue).
+                    // The guest starts when the host's start arrives.
                     if session.rematch_me && !crate::net::is_host() {
-                        if let Some(seed) = take_start() {
+                        if let Some(seed) = session.next_start.take() {
                             return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
                         }
                     }
@@ -978,13 +983,3 @@ impl App {
     }
 }
 
-/// A start message waiting in the network queue (the guest's rematch), if any. Other
-/// messages read while looking are dropped: between matches only the start matters.
-fn take_start() -> Option<u64> {
-    while let Some(text) = crate::net::poll() {
-        if let Some(Msg::Start { seed }) = Msg::decode(&text) {
-            return Some(seed);
-        }
-    }
-    None
-}
