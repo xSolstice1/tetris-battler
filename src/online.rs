@@ -9,15 +9,16 @@ use crate::game::{Active, Game, NEXT_PREVIEW};
 use crate::piece::PieceKind;
 
 /// Bumped when the protocol changes, so old and new builds don't play each other.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// Rows sent per snapshot: the visible field plus the buffer rows drawn above it.
 const ROWS: usize = 23;
 
 /// What one side sends the other.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
-    /// "I'm here": name and protocol version (sent on joining and when someone arrives).
-    Hello { name: String, protocol: u32 },
+    /// "I'm here": name, protocol version and what the room is (sent on joining and when
+    /// someone arrives).
+    Hello { name: String, protocol: u32, room: RoomKind },
     /// The host starts a match: both fields use this seed.
     Start { seed: u64 },
     /// The sender's field, for the other side to draw.
@@ -28,6 +29,26 @@ pub enum Msg {
     Ko,
     /// Ready for another match.
     Rematch,
+    /// Party: the host starts a match for these players (id, name), all from `seed`.
+    PartyStart { seed: u64, roster: Vec<(String, String)> },
+    /// Party: garbage the sender sent to the player with this id.
+    Hit { to: String, lines: u32 },
+}
+
+/// What a room is for, as far as the sender knows (whoever made it knows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKind {
+    Unknown,
+    Duel,
+    Party,
+}
+
+/// Most players in a party room.
+pub const PARTY_MAX: usize = 10;
+
+/// A name or id safe to put in a message (no separators, at most 16 characters).
+pub fn clean_name(s: &str) -> String {
+    s.chars().filter(|c| !"|;:,\n".contains(*c)).take(16).collect()
 }
 
 /// Everything the other side needs to draw a field and its numbers.
@@ -148,7 +169,19 @@ impl Snapshot {
 impl Msg {
     pub fn encode(&self) -> String {
         match self {
-            Msg::Hello { name, protocol } => format!("hello|{}|{protocol}", name.replace('|', "/")),
+            Msg::Hello { name, protocol, room } => {
+                let k = match room {
+                    RoomKind::Unknown => 0,
+                    RoomKind::Duel => 1,
+                    RoomKind::Party => 2,
+                };
+                format!("hello|{}|{protocol}|{k}", clean_name(name))
+            }
+            Msg::PartyStart { seed, roster } => {
+                let list: Vec<String> = roster.iter().map(|(id, name)| format!("{}:{}", clean_name(id), clean_name(name))).collect();
+                format!("pstart|{seed}|{}", list.join(";"))
+            }
+            Msg::Hit { to, lines } => format!("hit|{}|{lines}", clean_name(to)),
             Msg::Start { seed } => format!("start|{seed}"),
             Msg::Snap(s) => format!("snap|{}", s.encode()),
             Msg::Garbage(n) => format!("garbage|{n}"),
@@ -161,7 +194,25 @@ impl Msg {
     pub fn decode(text: &str) -> Option<Msg> {
         let f: Vec<&str> = text.split('|').collect();
         Some(match f.as_slice() {
-            ["hello", name, protocol] => Msg::Hello { name: name.chars().take(16).collect(), protocol: protocol.parse().ok()? },
+            // (Protocol 1 sent no room kind: it decodes, and the version mismatch shows.)
+            ["hello", name, protocol] => Msg::Hello { name: clean_name(name), protocol: protocol.parse().ok()?, room: RoomKind::Unknown },
+            ["hello", name, protocol, k] => Msg::Hello {
+                name: clean_name(name),
+                protocol: protocol.parse().ok()?,
+                room: match *k {
+                    "1" => RoomKind::Duel,
+                    "2" => RoomKind::Party,
+                    _ => RoomKind::Unknown,
+                },
+            },
+            ["pstart", seed, list] => {
+                let roster: Vec<(String, String)> = list.split(';').filter_map(|e| e.split_once(':')).map(|(id, n)| (clean_name(id), clean_name(n))).take(PARTY_MAX).collect();
+                if roster.len() < 2 {
+                    return None;
+                }
+                Msg::PartyStart { seed: seed.parse().ok()?, roster }
+            }
+            ["hit", to, n] => Msg::Hit { to: clean_name(to), lines: n.parse::<u32>().ok()?.min(30) },
             ["start", seed] => Msg::Start { seed: seed.parse().ok()? },
             ["snap", rest @ ..] => Msg::Snap(Snapshot::decode(rest)?),
             // A single clear can't send more than a perfect clear quad with a big combo.
@@ -203,7 +254,10 @@ mod tests {
         g.apply(Action::HardDrop);
         g.receive_garbage(3);
         for m in [
-            Msg::Hello { name: "Luoyi".into(), protocol: PROTOCOL },
+            Msg::Hello { name: "Luoyi".into(), protocol: PROTOCOL, room: RoomKind::Party },
+            Msg::Hello { name: "Deon".into(), protocol: PROTOCOL, room: RoomKind::Unknown },
+            Msg::PartyStart { seed: 77, roster: vec![("ab12".into(), "PLAYER 101".into()), ("zz9".into(), "Luoyi".into())] },
+            Msg::Hit { to: "ab12".into(), lines: 5 },
             Msg::Start { seed: 123456789 },
             Msg::Snap(Snapshot::of(&g)),
             Msg::Garbage(4),
@@ -239,6 +293,10 @@ mod tests {
             assert_eq!(Msg::decode(bad), None, "{bad}");
         }
         assert_eq!(Msg::decode("garbage|9999"), Some(Msg::Garbage(30)));
+        assert_eq!(Msg::decode("pstart|5|solo:me"), None, "a party needs two");
+        assert_eq!(Msg::decode("hello|old|1"), Some(Msg::Hello { name: "old".into(), protocol: 1, room: RoomKind::Unknown }));
+        let names = Msg::Hello { name: "a|b;c:d".into(), protocol: 2, room: RoomKind::Duel };
+        assert_eq!(Msg::decode(&names.encode()), Some(Msg::Hello { name: "abcd".into(), protocol: 2, room: RoomKind::Duel }));
     }
 
     #[test]

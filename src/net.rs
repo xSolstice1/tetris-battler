@@ -23,6 +23,8 @@ mod imp {
         fn bb_net_poll() -> i32;
         fn bb_net_take(ptr: *mut u8);
         fn bb_net_status() -> i32;
+        fn bb_net_me() -> i32;
+        fn bb_net_roster() -> i32;
         fn bb_net_peers() -> i32;
         fn bb_net_is_host() -> i32;
         fn bb_net_leave();
@@ -34,14 +36,30 @@ mod imp {
     pub fn send(text: &str) {
         unsafe { bb_net_send(text.as_ptr(), text.len() as u32) }
     }
-    pub fn poll() -> Option<String> {
-        let n = unsafe { bb_net_poll() };
+    fn take(n: i32) -> Option<String> {
         if n < 0 {
             return None;
         }
         let mut buf = vec![0u8; n as usize];
         unsafe { bb_net_take(buf.as_mut_ptr()) };
         String::from_utf8(buf).ok()
+    }
+    /// The next message: who sent it, and what.
+    pub fn poll() -> Option<(String, String)> {
+        loop {
+            let text = take(unsafe { bb_net_poll() })?;
+            if let Some((from, msg)) = text.split_once('\n') {
+                return Some((from.to_owned(), msg.to_owned()));
+            }
+        }
+    }
+    /// Our id in the room.
+    pub fn me() -> String {
+        take(unsafe { bb_net_me() }).unwrap_or_default()
+    }
+    /// Everyone present (ids), sorted: the first is the host.
+    pub fn roster() -> Vec<String> {
+        take(unsafe { bb_net_roster() }).map(|s| s.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
     }
     pub fn status() -> Status {
         match unsafe { bb_net_status() } {
@@ -68,8 +86,14 @@ mod imp {
     use super::Status;
     pub fn join(_: &str) {}
     pub fn send(_: &str) {}
-    pub fn poll() -> Option<String> {
+    pub fn poll() -> Option<(String, String)> {
         None
+    }
+    pub fn me() -> String {
+        String::new()
+    }
+    pub fn roster() -> Vec<String> {
+        Vec::new()
     }
     pub fn status() -> Status {
         Status::Unavailable
@@ -83,4 +107,4 @@ mod imp {
     pub fn leave() {}
 }
 
-pub use imp::{is_host, join, leave, peers, poll, send, status};
+pub use imp::{is_host, join, leave, me, peers, poll, roster, send, status};

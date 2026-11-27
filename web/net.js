@@ -30,7 +30,10 @@
         if (!ensure()) return;
         status = 1;
         channel = client.channel("block-brawl-" + room, { config: { broadcast: { self: false, ack: false }, presence: { key: me } } });
-        channel.on("broadcast", { event: "m" }, (m) => { if (m.payload && typeof m.payload.t === "string") inbox.push(m.payload.t); });
+        channel.on("broadcast", { event: "m" }, (m) => {
+          const p = m.payload;
+          if (p && typeof p.t === "string") inbox.push((typeof p.f === "string" ? p.f.slice(0, 16) : "?") + "\n" + p.t);
+        });
         channel.on("presence", { event: "sync" }, () => { members = Object.keys(channel.presenceState()).sort(); });
         channel.subscribe(async (s) => {
           console.log("bb_net " + s);
@@ -39,13 +42,16 @@
         });
       };
       env.bb_net_send = function (p, l) {
-        if (channel && status === 2) channel.send({ type: "broadcast", event: "m", payload: { t: text(p, l) } });
+        if (channel && status === 2) channel.send({ type: "broadcast", event: "m", payload: { t: text(p, l), f: me } });
       };
       env.bb_net_poll = function () {
         if (!inbox.length) return -1;
         out = new TextEncoder().encode(inbox.shift());
         return out.length;
       };
+      // Our id, and everyone present (ids, comma separated): read with bb_net_take.
+      env.bb_net_me = function () { out = new TextEncoder().encode(me); return out.length; };
+      env.bb_net_roster = function () { out = new TextEncoder().encode(members.join(",")); return out.length; };
       env.bb_net_take = function (p) {
         new Uint8Array(wasm_memory.buffer, p, out.length).set(out);
         out = new Uint8Array(0);

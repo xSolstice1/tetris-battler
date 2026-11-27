@@ -8,7 +8,7 @@ use macroquad::prelude::*;
 use crate::audio::{Audio, Mood, Track};
 use crate::battle::{Battle, BattleEvent};
 use crate::bot::SHADOWS;
-use crate::online::{Msg, Snapshot};
+use crate::online::{Msg, PARTY_MAX, PROTOCOL, RoomKind, Snapshot};
 use crate::versus::{Versus, VsEvent};
 use crate::fx::{Effects, Fx};
 use crate::settings::{Bind, Settings};
@@ -42,8 +42,8 @@ impl Mode {
                 blurb: "Beat a gauntlet of monsters before time runs out. They hit back with garbage.",
             },
             Mode::Online => MenuItem {
-                title: "ONLINE 1V1",
-                blurb: "Battle a friend live: create a room, share the code.",
+                title: "ONLINE",
+                blurb: "Battle friends live: a 1v1, or a party of up to 10. Share the room code.",
             },
             Mode::Shadow => MenuItem {
                 title: "SHADOW 1V1",
@@ -114,6 +114,12 @@ struct Session {
     rematch_them: bool,
     /// The host's start for the next match (a rematch), once it arrives.
     next_start: Option<u64>,
+    /// Party: our id and name, everyone else in the room (id, name; for the next match),
+    /// and the host's next match once it arrives.
+    me: String,
+    my_name: String,
+    names: Vec<(String, String)>,
+    next_party: Option<(u64, Vec<(String, String)>)>,
 }
 
 impl Session {
@@ -145,7 +151,23 @@ impl Session {
             rematch_me: false,
             rematch_them: false,
             next_start: None,
+            me: String::new(),
+            my_name: String::new(),
+            names: Vec::new(),
+            next_party: None,
         }
+    }
+
+    /// A party match in `room`: everyone in `roster` (us included), all from `seed`.
+    fn new_party(seed: u64, roster: &[(String, String)], room: String, me: String, my_name: String, opts: &Settings) -> Self {
+        let mut game = Game::new(seed);
+        let versus = Versus::new_party(&me, roster, seed, &mut game);
+        let names = roster.iter().filter(|(id, _)| *id != me).cloned().collect();
+        Session { versus: Some(versus), me, my_name, names, ..Session::new_online(seed, String::new(), room, opts) }
+    }
+
+    fn party(&self) -> bool {
+        self.versus.as_ref().is_some_and(|v| v.party.is_some())
     }
 
     /// An online match in `room` against `opponent`, both fields from `seed`.
@@ -170,6 +192,10 @@ impl Session {
             rematch_me: false,
             rematch_them: false,
             next_start: None,
+            me: String::new(),
+            my_name: String::new(),
+            names: Vec::new(),
+            next_party: None,
         }
     }
 
@@ -178,24 +204,44 @@ impl Session {
         if self.room.is_none() {
             return;
         }
-        while let Some(text) = crate::net::poll() {
+        let party = self.party();
+        while let Some((from, text)) = crate::net::poll() {
             let Some(msg) = Msg::decode(&text) else {
                 continue;
             };
             match msg {
                 Msg::Rematch => self.rematch_them = true,
                 Msg::Start { seed } => self.next_start = Some(seed),
+                // Party: someone new in the room (they'll be in the next match).
+                Msg::Hello { name, protocol: PROTOCOL, .. } if party => {
+                    if !self.names.iter().any(|(id, _)| *id == from) {
+                        self.names.push((from, name));
+                        crate::net::send(&Msg::Hello { name: self.my_name.clone(), protocol: PROTOCOL, room: RoomKind::Party }.encode());
+                    }
+                }
                 Msg::Hello { .. } => {}
+                Msg::PartyStart { seed, roster } => {
+                    if roster.iter().any(|(id, _)| *id == self.me) {
+                        self.next_party = Some((seed, roster));
+                    }
+                }
                 m => {
                     if let Some(vs) = &mut self.versus {
-                        vs.on_remote(&m, &mut self.game);
+                        if party {
+                            vs.on_party(&from, &m, &mut self.game);
+                        } else {
+                            vs.on_remote(&m, &mut self.game);
+                        }
                     }
                 }
             }
         }
         if let Some(vs) = &mut self.versus {
-            // Someone left the room mid-match: they forfeit.
-            if crate::net::peers() < 2 && vs.fighting() {
+            if party {
+                let here = crate::net::roster();
+                vs.party_present(&here);
+            } else if crate::net::peers() < 2 && vs.fighting() {
+                // Someone left the room mid-match: they forfeit.
                 vs.opponent_left();
             }
             for m in vs.take_outbox() {
@@ -203,12 +249,15 @@ impl Session {
             }
         }
         // Our field: on every change (locks, holds, garbage), and twice a second anyway
-        // so their view of our falling piece keeps up.
+        // so their view of our falling piece keeps up. A party sends less (everyone gets
+        // everyone's), and nothing once we're out.
         self.snap_timer -= dt;
-        if self.net_dirty || self.snap_timer <= 0.0 {
+        let (beat, gap) = if party { (1.0, 0.75) } else { (0.5, 0.0) };
+        let due = (self.net_dirty && self.snap_timer <= gap) || self.snap_timer <= 0.0;
+        if due && !(party && self.game.game_over && !self.net_dirty) {
             crate::net::send(&Msg::Snap(Snapshot::of(&self.game)).encode());
             self.net_dirty = false;
-            self.snap_timer = 0.5;
+            self.snap_timer = beat;
         }
     }
 
@@ -217,6 +266,10 @@ impl Session {
         let s = &self.game.stats;
         let kind = match (&self.battle, &self.versus) {
             (Some(b), _) => RunKind::Battler { defeated: b.defeated },
+            (_, Some(vs)) if vs.party.is_some() => {
+                let p = vs.party.as_ref().map_or((1, 2), |p| (p.my_place.unwrap_or(p.alive()), p.players()));
+                RunKind::Party { place: p.0, players: p.1 }
+            }
             (_, Some(vs)) if vs.online() => RunKind::Online { won: vs.player_won() },
             (_, Some(vs)) => RunKind::Shadow { shadow: self.shadow, won: vs.player_won(), time: vs.time },
             _ => RunKind::Classic { score: self.game.score },
@@ -341,12 +394,20 @@ enum Screen {
 /// The online lobby's steps.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lobby {
-    /// Create a room, join one, or back (focused option).
+    /// Create a 1v1 room, create a party, or join one (focused option).
     Choose { focus: usize },
     /// Typing a friend's room code.
     Typing { code: String },
-    /// In a room, waiting for the other player (and their name).
-    Room { code: String, opponent: Option<String>, hello_in: f32, problem: Option<&'static str> },
+    /// In a room: what it's for (known to whoever made it; guests learn it from hellos),
+    /// everyone else there whose name we know (id, name), and anything wrong.
+    /// `here` is who's present right now (a name can arrive before its presence does).
+    Room { code: String, kind: RoomKind, names: Vec<(String, String)>, here: Vec<String>, hello_in: f32, problem: Option<&'static str> },
+}
+
+/// Who plays the next party match: us first, then the others in the room (at most
+/// `PARTY_MAX` in all).
+fn party_roster(me: &str, my_name: &str, names: &[(String, String)]) -> Vec<(String, String)> {
+    std::iter::once((me.to_owned(), my_name.to_owned())).chain(names.iter().cloned()).take(PARTY_MAX).collect()
 }
 
 /// A settings screen opened from the paused run (filled in once the run is moved over).
@@ -557,6 +618,31 @@ impl App {
                 let Screen::Play(session) = &mut self.screen else {
                     return None;
                 };
+                if session.party() {
+                    // The host started the next match (we're in it).
+                    if let Some((seed, roster)) = session.next_party.take() {
+                        let (me, name) = (session.me.clone(), session.my_name.clone());
+                        return Some(Screen::Play(Box::new(Session::new_party(seed, &roster, room, me, name, &self.progress.settings))));
+                    }
+                    if session.over() {
+                        if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
+                            crate::net::leave();
+                            return Some(Screen::Menu { selected: menu_index(Entry::Play(Mode::Online)) });
+                        }
+                        let finished = session.versus.as_ref().and_then(|v| v.party.as_ref()).is_some_and(|p| p.finished());
+                        let here = crate::net::roster();
+                        let names: Vec<(String, String)> = session.names.iter().filter(|(id, _)| here.contains(id)).cloned().collect();
+                        let ready = finished && crate::net::is_host() && !names.is_empty();
+                        if ready && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R)) {
+                            let roster = party_roster(&session.me, &session.my_name, &names);
+                            let seed = new_seed();
+                            crate::net::send(&Msg::PartyStart { seed, roster: roster.clone() }.encode());
+                            let (me, name) = (session.me.clone(), session.my_name.clone());
+                            return Some(Screen::Play(Box::new(Session::new_party(seed, &roster, room, me, name, &self.progress.settings))));
+                        }
+                    }
+                    return None;
+                }
                 if session.over() {
                     // Rematch: both press Enter; the host then starts a fresh match.
                     if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::R) {
@@ -726,8 +812,11 @@ impl App {
         let back = Screen::Menu { selected: menu_index(Entry::Play(Mode::Online)) };
         match lobby {
             Lobby::Choose { focus } => {
-                if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::Up) {
-                    *focus = 1 - *focus;
+                if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
+                    *focus = (*focus + 1) % 3;
+                }
+                if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
+                    *focus = (*focus + 2) % 3;
                 }
                 if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
                     return Some(back);
@@ -737,12 +826,14 @@ impl App {
                     *focus = i;
                 }
                 let pick = (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) || (is_mouse_button_pressed(MouseButton::Left) && hit.is_some())).then_some(*focus);
+                let room = |kind| {
+                    let code = crate::online::room_code(new_seed());
+                    crate::net::join(&code);
+                    Lobby::Room { code, kind, names: Vec::new(), here: Vec::new(), hello_in: 0.0, problem: None }
+                };
                 match pick {
-                    Some(0) => {
-                        let code = crate::online::room_code(new_seed());
-                        crate::net::join(&code);
-                        *lobby = Lobby::Room { code, opponent: None, hello_in: 0.0, problem: None };
-                    }
+                    Some(0) => *lobby = room(RoomKind::Duel),
+                    Some(1) => *lobby = room(RoomKind::Party),
                     Some(_) => *lobby = Lobby::Typing { code: String::new() },
                     None => {}
                 }
@@ -756,15 +847,15 @@ impl App {
                     code.pop();
                 }
                 if is_key_pressed(KeyCode::Escape) {
-                    *lobby = Lobby::Choose { focus: 1 };
+                    *lobby = Lobby::Choose { focus: 2 };
                 } else if is_key_pressed(KeyCode::Enter) && code.len() == 4 {
                     let code = code.clone();
                     crate::net::join(&code);
-                    *lobby = Lobby::Room { code, opponent: None, hello_in: 0.0, problem: None };
+                    *lobby = Lobby::Room { code, kind: RoomKind::Unknown, names: Vec::new(), here: Vec::new(), hello_in: 0.0, problem: None };
                 }
                 None
             }
-            Lobby::Room { code, opponent, hello_in, problem } => {
+            Lobby::Room { code, kind, names, here: present, hello_in, problem } => {
                 if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Q) {
                     crate::net::leave();
                     return Some(back);
@@ -774,52 +865,81 @@ impl App {
                     crate::net::Status::Error => *problem = Some("Couldn't reach the server. Esc and try again."),
                     _ => {}
                 }
-                let here = crate::net::peers();
-                if here > 2 {
-                    *problem = Some("That room is full. Esc and make a new one.");
+                let joined = crate::net::status() == crate::net::Status::Joined;
+                let me = crate::net::me();
+                let here = crate::net::roster();
+                present.clone_from(&here);
+                let seat = here.iter().position(|id| *id == me).unwrap_or(0);
+                match *kind {
+                    RoomKind::Duel if here.len() > 2 && seat >= 2 => *problem = Some("That room is full. Esc and make a new one."),
+                    RoomKind::Party if here.len() > PARTY_MAX && seat >= PARTY_MAX => *problem = Some("That party is full (10 players). Esc and try another."),
+                    _ => {}
                 }
                 // Say hello (and keep saying it until we know who's there).
                 *hello_in -= dt;
-                if crate::net::status() == crate::net::Status::Joined && here >= 2 && opponent.is_none() && *hello_in <= 0.0 {
-                    let name = self.player_name.clone();
-                    crate::net::send(&Msg::Hello { name, protocol: crate::online::PROTOCOL }.encode());
+                let unknown = here.iter().any(|id| *id != me && !names.iter().any(|(n, _)| n == id));
+                if joined && unknown && *hello_in <= 0.0 {
+                    crate::net::send(&Msg::Hello { name: self.player_name.clone(), protocol: PROTOCOL, room: *kind }.encode());
                     *hello_in = 1.0;
                 }
                 let mut start = None;
-                while let Some(text) = crate::net::poll() {
+                let mut party_start = None;
+                while let Some((from, text)) = crate::net::poll() {
                     match Msg::decode(&text) {
-                        Some(Msg::Hello { name, protocol }) => {
-                            if protocol != crate::online::PROTOCOL {
-                                *problem = Some("Your friend has a different version. Both reload the page.");
-                            } else {
-                                if opponent.is_none() {
+                        Some(Msg::Hello { name, protocol, room }) => {
+                            if protocol != PROTOCOL {
+                                *problem = Some("Someone here has a different version. Everyone reload the page.");
+                                continue;
+                            }
+                            if *kind == RoomKind::Unknown && room != RoomKind::Unknown {
+                                *kind = room;
+                            }
+                            match names.iter_mut().find(|(id, _)| *id == from) {
+                                Some(entry) => entry.1 = name,
+                                None => {
                                     // Make sure they know us too.
-                                    let me = self.player_name.clone();
-                                    crate::net::send(&Msg::Hello { name: me, protocol: crate::online::PROTOCOL }.encode());
+                                    names.push((from, name));
+                                    crate::net::send(&Msg::Hello { name: self.player_name.clone(), protocol: PROTOCOL, room: *kind }.encode());
                                 }
-                                *opponent = Some(name);
                             }
                         }
                         Some(Msg::Start { seed }) => start = Some(seed),
+                        Some(Msg::PartyStart { seed, roster }) if roster.iter().any(|(id, _)| *id == me) => party_start = Some((seed, roster)),
                         _ => {}
                     }
                 }
                 if problem.is_some() {
                     return None;
                 }
-                let Some(name) = opponent.clone() else {
-                    return None;
-                };
                 let room = code.clone();
-                if crate::net::is_host() {
-                    let seed = new_seed();
-                    crate::net::send(&Msg::Start { seed }.encode());
-                    return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
+                let opts = &self.progress.settings;
+                let names: Vec<(String, String)> = names.iter().filter(|(id, _)| here.contains(id)).cloned().collect();
+                match *kind {
+                    RoomKind::Unknown => None,
+                    RoomKind::Party => {
+                        if let Some((seed, roster)) = party_start {
+                            return Some(Screen::Play(Box::new(Session::new_party(seed, &roster, room, me, self.player_name.clone(), opts))));
+                        }
+                        // The host starts once someone else is here.
+                        if crate::net::is_host() && !names.is_empty() && is_key_pressed(KeyCode::Enter) {
+                            let roster = party_roster(&me, &self.player_name, &names);
+                            let seed = new_seed();
+                            crate::net::send(&Msg::PartyStart { seed, roster: roster.clone() }.encode());
+                            return Some(Screen::Play(Box::new(Session::new_party(seed, &roster, room, me, self.player_name.clone(), opts))));
+                        }
+                        None
+                    }
+                    RoomKind::Duel => {
+                        let name = names.first()?.1.clone();
+                        if crate::net::is_host() {
+                            let seed = new_seed();
+                            crate::net::send(&Msg::Start { seed }.encode());
+                            return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, opts))));
+                        }
+                        let seed = start?;
+                        Some(Screen::Play(Box::new(Session::new_online(seed, name, room, opts))))
+                    }
                 }
-                if let Some(seed) = start {
-                    return Some(Screen::Play(Box::new(Session::new_online(seed, name, room, &self.progress.settings))));
-                }
-                None
             }
         }
     }
@@ -974,7 +1094,7 @@ impl App {
                 render::warm_portraits();
             }
             Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.progress.settings.scene, &self.progress),
-            Screen::Online(lobby) => render::draw_online(lobby, &self.player_name, &self.progress),
+            Screen::Online(lobby) => render::draw_online(lobby, &self.player_name, &self.progress, crate::net::is_host()),
             Screen::Settings { tab, row, slot, rebinding, back } => {
                 render::draw_settings(&self.progress.settings, self.extra(), *tab, *row, *slot, *rebinding, self.settings_hover, back.is_some())
             }

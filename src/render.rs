@@ -854,7 +854,10 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
     }
 
     if let Some(vs) = versus {
-        draw_versus_panel(&v, vs, scene_still);
+        match &vs.party {
+            Some(party) => draw_party_panel(&v, vs, party, still),
+            None => draw_versus_panel(&v, vs, scene_still),
+        }
         scene.draw_shots(&v);
     }
 
@@ -863,6 +866,7 @@ pub fn draw(game: &Game, paused: bool, fx: &Fx, scene: &Scene, sound_on: bool, m
     // Overlays.
     if let Some(vs) = versus {
         match vs.phase {
+            VsPhase::Over { .. } if fx.death_done() && vs.party.is_some() => draw_party_results(&v, vs, &game.stats, reward),
             VsPhase::Over { player_won } if fx.death_done() => draw_versus_results(&v, vs, player_won, &game.stats, reward),
             VsPhase::Over { .. } => {}
             VsPhase::Countdown { left } => draw_countdown(&v, vs, left, still),
@@ -1426,6 +1430,149 @@ fn draw_versus_panel(v: &View, vs: &Versus, still: bool) {
         ui::panel(v, band, &ui::Panel::card().radius(10.0));
         ui::caps_centered(v, "TOPPED OUT", OPP_X + bw / 2.0, ui::baseline(band.center().y, 24.0), 24.0, hex(ui::TEXT2), 3.0);
     }
+}
+
+/// Columns, rows and cell size for `n` mini fields in the party panel.
+pub(crate) fn party_grid(n: usize) -> (usize, usize, f32) {
+    let cols = match n {
+        0 | 1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    };
+    let rows = n.div_ceil(cols).max(1);
+    let cell = ((PARTY_W / cols as f32 - 18.0) / WIDTH as f32).min((PARTY_H / rows as f32 - 34.0) / VISIBLE_ROWS as f32).min(OPP_CELL);
+    (cols, rows, cell.floor())
+}
+
+const PARTY_W: f32 = BATTLE_W - PANEL_X - 10.0;
+const PARTY_H: f32 = VIRTUAL_H - BOARD_Y - 20.0;
+
+/// Everyone else in a party: a grid of mini fields with names, incoming garbage, who we
+/// just hit (gold) and who just hit us (pink), and a place once they're out.
+fn draw_party_panel(v: &View, vs: &Versus, party: &crate::party::Party, still: bool) {
+    let n = party.members.len();
+    let (cols, rows, cell) = party_grid(n);
+    let (bw, bh) = (WIDTH as f32 * cell, VISIBLE_ROWS as f32 * cell);
+    let (slot_w, slot_h) = (PARTY_W / cols as f32, PARTY_H / rows as f32);
+    let label = format!("PARTY  ·  {} OF {} LEFT", party.alive(), party.players());
+    ui::section(v, PANEL_X, BOARD_Y - 10.0, PARTY_W, &label, hex(ui::TEXT2));
+    let gold = hex(ui::GOLD);
+    let pink = hex(ui::PINK);
+    for (i, m) in party.members.iter().enumerate() {
+        let (c, r) = (i % cols, i / cols);
+        let x = PANEL_X + c as f32 * slot_w + (slot_w - bw) / 2.0;
+        let y = BOARD_Y + 14.0 + r as f32 * slot_h + 20.0;
+        let g = &m.field;
+        let out = !m.alive();
+        // Name over the field.
+        let size = if cell >= 14.0 { 16.0 } else { 13.0 };
+        let name_w = v.measure_mixed(&m.name, size);
+        let fit = if name_w > bw + 10.0 { size * (bw + 10.0) / name_w } else { size };
+        text_mixed_shadow(v, &m.name, x + bw / 2.0 - name_w * fit / size / 2.0, y - 7.0, fit, if out { hex(ui::TEXT3) } else { WHITE });
+        // The frame: gold as our attack lands, pink as theirs reaches us, red in danger.
+        let danger = if out { 0.0 } else { crate::danger::level(g) };
+        let hit = (1.0 - m.since_hit / crate::party::HIT_SHOW).max(0.0);
+        let attacked = (1.0 - m.since_attacked / crate::party::HIT_SHOW).max(0.0);
+        let beat = if still { 0.6 } else { 0.5 + 0.5 * (get_time() as f32 * (4.0 + 7.0 * danger)).sin() };
+        let mut frame = if out { hex(0x3a3f50) } else { mix_colors(Color::new(1.0, 1.0, 1.0, 0.16), hex(0xff3b4f), danger * (0.45 + 0.55 * beat)) };
+        frame = mix_colors(frame, gold, hit);
+        frame = mix_colors(frame, pink, attacked * (1.0 - hit));
+        let t = 2.0 + 2.0 * hit.max(attacked);
+        ui::shadow(v, Rect::new(x - t, y - t, bw + 2.0 * t, bh + 2.0 * t), 3.0, 8.0, 3.0, 0.4);
+        v.rect(x - t, y - t, bw + 2.0 * t, bh + 2.0 * t, frame);
+        v.rect(x, y, bw, bh, hex(theme().field));
+        let at = |cx: i32, cy: i32| (x + cx as f32 * cell, y + (cy - HIDDEN_ROWS as i32) as f32 * cell);
+        let grey = hex(0x4a5064);
+        for yy in HIDDEN_ROWS..TOTAL_ROWS {
+            for xx in 0..WIDTH {
+                if let Some(cl) = g.board.get(xx, yy) {
+                    let (px, py) = at(xx as i32, yy as i32);
+                    let col = if out { grey } else { cell_color(cl) };
+                    if cell >= 12.0 {
+                        v.block(px, py, cell, col);
+                    } else {
+                        v.rect(px, py, cell - 1.0, cell - 1.0, col);
+                    }
+                }
+            }
+        }
+        // (Still drawn once we're out: we're watching.)
+        if !out && !matches!(vs.phase, VsPhase::Countdown { .. }) {
+            let a = g.active;
+            for (ax, ay) in a.cells() {
+                if ay >= HIDDEN_ROWS as i32 {
+                    let (px, py) = at(ax, ay);
+                    v.rect(px, py, cell - 1.0, cell - 1.0, piece_color(a.kind));
+                }
+            }
+        }
+        let pending = g.pending_garbage();
+        if pending > 0 && !out {
+            let h = pending.min(VISIBLE_ROWS as u32) as f32 * cell;
+            v.rect(x - t - 5.0, y + bh - h, 3.0, h, pink);
+        }
+        if let Some(place) = m.place {
+            let band = Rect::new(x + 4.0, y + bh / 2.0 - 22.0, bw - 8.0, 44.0);
+            ui::panel(v, band, &ui::Panel::card().radius(8.0));
+            let (txt, c) = if place == 1 { ("WIN".to_owned(), gold) } else { (format!("#{place}"), hex(ui::TEXT2)) };
+            ui::text_shadow_centered(v, &txt, band.center().x, ui::baseline(band.center().y, 26.0), 26.0, c);
+        }
+    }
+}
+
+fn place_suffix(n: u32) -> &'static str {
+    match (n % 10, n % 100) {
+        (_, 11..=13) => "TH",
+        (1, _) => "ST",
+        (2, _) => "ND",
+        (3, _) => "RD",
+        _ => "TH",
+    }
+}
+
+/// Where we finished, and the standings so far (players still in at the top).
+fn draw_party_results(v: &View, vs: &Versus, mine: &Stats, reward: Option<&Reward>) {
+    let Some(party) = &vs.party else {
+        return;
+    };
+    let place = party.my_place.unwrap_or(party.alive());
+    let won = place == 1;
+    let color = if won { hex(ui::GOLD) } else { hex(ui::CYAN) };
+    let card = results_card(v, color);
+    let cx = card.center().x;
+    let title = if won { "WINNER!".to_owned() } else { format!("{place}{}", place_suffix(place)) };
+    ui::radial(v, cx, BOARD_Y + 74.0, 150.0, 40.0, with_alpha(color, 0.18), with_alpha(color, 0.0));
+    ui::text_shadow_centered(v, &title, cx, BOARD_Y + 92.0, 56.0, color);
+    ui::caps_centered(v, &format!("OF {} PLAYERS", party.players()), cx, BOARD_Y + 120.0, 13.0, hex(ui::TEXT2), 2.5);
+    let line = format!("{} PPS   ·   {} APM   ·   {} SENT", stats::fmt_rate(mine.pps(), 2), stats::fmt_rate(mine.apm(), 1), vs.sent);
+    v.text_centered(&line, cx, BOARD_Y + 150.0, 16.0, hex(ui::TEXT2));
+
+    let (left, right) = (card.x + 22.0, card.right() - 22.0);
+    let top = BOARD_Y + 172.0;
+    let standings = party.standings("YOU");
+    let row_h = (250.0 / standings.len() as f32).min(28.0);
+    for (i, (name, place, me)) in standings.iter().enumerate() {
+        let y = top + i as f32 * row_h;
+        let cy = y + row_h / 2.0;
+        if *me {
+            ui::fill(v, Rect::new(left - 8.0, y + 1.0, right - left + 16.0, row_h - 2.0), 5.0, with_alpha(hex(ui::CYAN), 0.12), with_alpha(hex(ui::CYAN), 0.08));
+        } else if i % 2 == 0 {
+            v.rect(left - 8.0, y + 1.0, right - left + 16.0, row_h - 2.0, Color::new(1.0, 1.0, 1.0, 0.03));
+        }
+        let size = (row_h * 0.62).min(17.0);
+        let (p, pc) = match place {
+            Some(1) => ("1ST".to_owned(), hex(ui::GOLD)),
+            Some(p) => (format!("{p}{}", place_suffix(*p)), hex(ui::TEXT2)),
+            None => ("IN".to_owned(), hex(ui::GREEN)),
+        };
+        v.text(&p, left, ui::baseline(cy, size), size, pc);
+        v.text_mixed(name, left + 56.0, ui::baseline(cy, size), size, if *me { hex(ui::CYAN) } else { WHITE });
+    }
+    if let Some(r) = reward {
+        draw_reward(v, r, BOARD_Y + 432.0);
+    }
+    let again = if !party.finished() { "watching..." } else if crate::net::is_host() { "next match" } else { "wait for host" };
+    ui::hints(v, cx, card.bottom() - 18.0, &[("Enter", again), ("Esc", "leave")], 15.0);
 }
 
 /// A block of the topped-out stack: it flashes, greys, then breaks loose and falls away
@@ -2136,6 +2283,17 @@ mod select_tests {
     use super::*;
 
     #[test]
+    fn party_fields_fit_the_panel_for_any_room_size() {
+        for n in 1..crate::online::PARTY_MAX {
+            let (cols, rows, cell) = party_grid(n);
+            assert!(cols * rows >= n, "{n}");
+            assert!(cell >= 8.0, "{n}: cell {cell} too small to read");
+            assert!(cols as f32 * (WIDTH as f32 * cell + 12.0) <= PARTY_W, "{n} too wide");
+            assert!(rows as f32 * (VISIBLE_ROWS as f32 * cell + 30.0) <= PARTY_H, "{n} too tall");
+        }
+    }
+
+    #[test]
     fn text_sizes_snap_to_a_few_glyph_sizes() {
         let sizes: std::collections::BTreeSet<u16> = (10..400).map(|px| glyph_size(px as f32 * 0.5).0).collect();
         assert!(sizes.len() <= GLYPH_SIZES.len());
@@ -2540,34 +2698,40 @@ fn a_mix(c: Color, toward: Color, t: f32) -> Color {
 // ───────────── Online lobby ─────────────
 
 fn online_button_rect(i: usize) -> Rect {
-    Rect::new(CLASSIC_W / 2.0 - 160.0, 300.0 + i as f32 * 74.0, 320.0, 58.0)
+    Rect::new(CLASSIC_W / 2.0 - 160.0, 262.0 + i as f32 * 84.0, 320.0, 56.0)
 }
 
 /// The lobby's Create / Join buttons under `screen_pos`, if any.
 pub fn online_hit(screen_pos: Vec2) -> Option<usize> {
     let p = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(screen_pos);
-    (0..2).find(|&i| online_button_rect(i).contains(p))
+    (0..3).find(|&i| online_button_rect(i).contains(p))
 }
 
 /// The online lobby: create or join a room, type a code, or wait in a room with its code.
-pub fn draw_online(lobby: &crate::app::Lobby, me: &str, progress: &Progress) {
+pub fn draw_online(lobby: &crate::app::Lobby, me: &str, progress: &Progress, host: bool) {
     use crate::app::Lobby;
     clear_background(hex(0x0b0d14));
     let v = View::fit_window(Vec2::ZERO, CLASSIC_W);
     scene::draw_menu_backdrop(&v, CLASSIC_W, Theme::classic(), progress.settings.scene);
     let cx = CLASSIC_W / 2.0;
-    ui::text_shadow_centered(&v, "ONLINE 1V1", cx, 150.0, ui::TITLE, WHITE);
+    let title = match lobby {
+        Lobby::Room { kind: crate::online::RoomKind::Party, .. } => "PARTY ROOM",
+        Lobby::Room { kind: crate::online::RoomKind::Duel, .. } => "ONLINE 1V1",
+        _ => "ONLINE",
+    };
+    ui::text_shadow_centered(&v, title, cx, 150.0, ui::TITLE, WHITE);
     ui::caps_centered(&v, &format!("PLAYING AS {me}"), cx, 186.0, ui::CAPS, hex(ui::TEXT3), 2.0);
     let mouse = View::fit_window(Vec2::ZERO, CLASSIC_W).to_virtual(Vec2::from(mouse_position()));
     match lobby {
         Lobby::Choose { focus } => {
-            for (i, (label, hint)) in [("CREATE ROOM", "get a code to share"), ("JOIN ROOM", "type a friend's code")].iter().enumerate() {
+            let options = [("CREATE 1V1", "a room for you and a friend"), ("CREATE PARTY", "free-for-all, up to 10 players"), ("JOIN ROOM", "type a friend's code")];
+            for (i, (label, hint)) in options.iter().enumerate() {
                 let r = online_button_rect(i);
                 let st = ui::State::new(*focus == i, r.contains(mouse));
                 ui::button(&v, r, label, 24.0, st, hex(ui::GOLD));
                 v.text_centered(hint, cx, r.bottom() + 16.0, 14.0, hex(ui::TEXT3));
             }
-            v.text_centered("Both players need this page open. It's a live 1v1: same pieces, garbage both ways.", cx, 480.0, 16.0, hex(ui::TEXT2));
+            v.text_centered("Everyone gets the same pieces. In a party, each attack hits a random rival.", cx, 548.0, 16.0, hex(ui::TEXT2));
         }
         Lobby::Typing { code } => {
             let card = Rect::new(cx - 200.0, 260.0, 400.0, 220.0);
@@ -2587,22 +2751,55 @@ pub fn draw_online(lobby: &crate::app::Lobby, me: &str, progress: &Progress) {
             let hint = if code.len() == 4 { "Enter to join   ·   Esc back" } else { "type the 4 letters   ·   Esc back" };
             v.text_centered(hint, cx, card.bottom() - 24.0, 16.0, hex(ui::TEXT3));
         }
-        Lobby::Room { code, opponent, problem, .. } => {
-            let card = Rect::new(cx - 220.0, 240.0, 440.0, 260.0);
+        Lobby::Room { code, kind, names, here, problem, .. } => {
+            use crate::online::RoomKind;
+            let names: Vec<&(String, String)> = names.iter().filter(|(id, _)| here.contains(id)).collect();
+            let party = *kind == RoomKind::Party;
+            let card = if party { Rect::new(cx - 260.0, 220.0, 520.0, 420.0) } else { Rect::new(cx - 220.0, 240.0, 440.0, 260.0) };
             ui::panel(&v, card, &ui::Panel::card());
             ui::caps_centered(&v, "ROOM CODE", cx, card.y + 38.0, ui::CAPS, hex(ui::TEXT2), 2.0);
             let spaced: String = code.chars().flat_map(|c| [c, ' ']).collect();
             ui::text_shadow_centered(&v, spaced.trim_end(), cx, card.y + 104.0, 64.0, hex(ui::GOLD));
-            v.text_centered("share this code with your friend", cx, card.y + 136.0, 16.0, hex(ui::TEXT3));
-            let (line, color) = match (problem, opponent, crate::net::status()) {
-                (Some(p), _, _) => (p.to_string(), hex(ui::PINK)),
-                (_, Some(name), _) => (format!("{name} is here. Starting..."), hex(ui::GREEN)),
-                (_, None, crate::net::Status::Joined) => ("Waiting for your opponent...".to_owned(), hex(ui::TEXT2)),
-                _ => ("Connecting...".to_owned(), hex(ui::TEXT2)),
+            v.text_centered(if party { "share this code: up to 10 can join" } else { "share this code with your friend" }, cx, card.y + 136.0, 16.0, hex(ui::TEXT3));
+            let joined = crate::net::status() == crate::net::Status::Joined;
+            let (line, color, steady) = match (problem, *kind) {
+                (Some(p), _) => (p.to_string(), hex(ui::PINK), true),
+                _ if !joined => ("Connecting...".to_owned(), hex(ui::TEXT2), false),
+                (_, RoomKind::Party) if names.is_empty() => ("Waiting for players...".to_owned(), hex(ui::TEXT2), false),
+                (_, RoomKind::Party) if host => ("Press Enter to start".to_owned(), hex(ui::GREEN), false),
+                (_, RoomKind::Party) => ("Waiting for the host to start...".to_owned(), hex(ui::TEXT2), false),
+                (_, RoomKind::Duel) if !names.is_empty() => (format!("{} is here. Starting...", names[0].1), hex(ui::GREEN), true),
+                (_, RoomKind::Duel) => ("Waiting for your opponent...".to_owned(), hex(ui::TEXT2), false),
+                (_, RoomKind::Unknown) => ("Joining...".to_owned(), hex(ui::TEXT2), false),
             };
+            if party {
+                // Everyone here, two columns of five; the host wears the crown.
+                let me_host = host;
+                let mut list: Vec<(String, bool)> = vec![(me.to_owned(), true)];
+                list.extend(names.iter().map(|(_, n)| (n.clone(), false)));
+                ui::caps(&v, &format!("PLAYERS  {}/{}", list.len().min(crate::online::PARTY_MAX), crate::online::PARTY_MAX), card.x + 30.0, card.y + 170.0, 12.0, hex(ui::TEXT2), 2.0);
+                for i in 0..crate::online::PARTY_MAX {
+                    let (col, row) = (i / 5, i % 5);
+                    let r = Rect::new(card.x + 24.0 + col as f32 * 240.0, card.y + 182.0 + row as f32 * 34.0, 232.0, 28.0);
+                    match list.get(i) {
+                        Some((name, mine)) => {
+                            ui::panel(&v, r, &ui::Panel::well());
+                            let c = if *mine { hex(ui::CYAN) } else { WHITE };
+                            v.text_mixed(name, r.x + 12.0, ui::baseline(r.center().y, 17.0), 17.0, c);
+                            if *mine && me_host {
+                                ui::pill(&v, r.right() - 54.0, r.center().y, "HOST", 10.0, hex(ui::GOLD), ui::Pill::Soft);
+                            } else if *mine {
+                                ui::caps(&v, "YOU", r.right() - 40.0, ui::baseline(r.center().y, 11.0), 11.0, hex(ui::TEXT3), 1.5);
+                            }
+                        }
+                        None => ui::stroke(&v, r, 6.0, 1.0, Color::new(1.0, 1.0, 1.0, 0.06)),
+                    }
+                }
+            }
             // A quiet pulse while waiting.
             let pulse = 0.6 + 0.4 * (get_time() as f32 * 3.0).sin().abs();
-            v.text_mixed(&line, cx - v.measure_mixed(&line, 20.0) / 2.0, card.y + 194.0, 20.0, Color { a: if opponent.is_some() || problem.is_some() { 1.0 } else { pulse }, ..color });
+            let ly = if party { card.bottom() - 52.0 } else { card.y + 194.0 };
+            v.text_mixed(&line, cx - v.measure_mixed(&line, 20.0) / 2.0, ly, 20.0, Color { a: if steady { 1.0 } else { pulse }, ..color });
             v.text_centered("Esc leave", cx, card.bottom() - 20.0, 15.0, hex(ui::TEXT3));
         }
     }

@@ -8,6 +8,7 @@
 
 use crate::bot::{Bot, Profile};
 use crate::online::Msg;
+use crate::party::Party;
 use crate::game::{Event, Game};
 
 /// Seconds of "3, 2, 1" before pieces fall.
@@ -60,6 +61,8 @@ pub struct Versus {
     /// (never ticked here) and garbage goes out through `outbox`.
     pub remote: Option<String>,
     outbox: Vec<Msg>,
+    /// Party rooms: everyone else's fields and the standings (`shadow` goes unused).
+    pub party: Option<Party>,
 }
 
 /// The stand-in profile for an online opponent (colour, labels; no bot, no portrait).
@@ -115,12 +118,62 @@ impl Versus {
             events: Vec::new(),
             remote: None,
             outbox: Vec::new(),
+            party: None,
         }
     }
 
     /// An online match against `name`: both fields from `seed`.
     pub fn new_remote(name: String, seed: u64, player: &mut Game) -> Self {
         Versus { remote: Some(name), ..Versus::new(REMOTE, seed, player) }
+    }
+
+    /// A party match: us (`me`) and the rest of `roster`, all from `seed`.
+    pub fn new_party(me: &str, roster: &[(String, String)], seed: u64, player: &mut Game) -> Self {
+        let party = Party::new(me, roster, seed);
+        let rivals = party.members.len();
+        let name = format!("{rivals} RIVAL{}", if rivals == 1 { "" } else { "S" });
+        Versus { party: Some(party), ..Versus::new_remote(name, seed, player) }
+    }
+
+    /// Party: something arrived from `from`.
+    pub fn on_party(&mut self, from: &str, msg: &Msg, player: &mut Game) {
+        let fighting = self.fighting();
+        let Some(party) = &mut self.party else {
+            return;
+        };
+        match msg {
+            Msg::Snap(snap) => party.on_snapshot(from, snap),
+            Msg::Hit { to, lines } if fighting && *to == party.me => {
+                party.attacked_by(from);
+                self.received += lines;
+                player.receive_garbage(*lines);
+                self.since_sent = 0.0;
+                self.last_sent = *lines;
+                self.events.push(VsEvent::Received { lines: *lines });
+            }
+            Msg::Ko => {
+                if party.knock_out(from) {
+                    self.party_won();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Party: who's still in the room (players who left are out).
+    pub fn party_present(&mut self, here: &[String]) {
+        if let Some(party) = &mut self.party {
+            if here.contains(&party.me) && party.present(here) {
+                self.party_won();
+            }
+        }
+    }
+
+    fn party_won(&mut self) {
+        if !self.over() {
+            self.phase = Phase::Over { player_won: true };
+            self.events.push(VsEvent::Won);
+        }
     }
 
     /// The opponent's name as shown.
@@ -190,7 +243,11 @@ impl Versus {
         let lines = sent_by(event);
         if lines > 0 {
             self.sent += lines;
-            if self.online() {
+            if let Some(party) = &mut self.party {
+                if let Some(to) = party.pick_target() {
+                    self.outbox.push(Msg::Hit { to, lines });
+                }
+            } else if self.online() {
                 self.outbox.push(Msg::Garbage(lines));
             } else {
                 self.shadow.receive_garbage(lines);
@@ -202,6 +259,9 @@ impl Versus {
     }
 
     pub fn update(&mut self, dt: f32, player: &mut Game) {
+        if let Some(party) = &mut self.party {
+            party.update(dt);
+        }
         match self.phase {
             Phase::Countdown { left } => {
                 let left = left - dt;
@@ -231,6 +291,9 @@ impl Versus {
                 self.phase = Phase::Over { player_won: false };
                 self.events.push(VsEvent::Lost);
                 self.outbox.push(Msg::Ko);
+                if let Some(party) = &mut self.party {
+                    party.topped_out();
+                }
             }
             return;
         }
@@ -424,6 +487,48 @@ mod online_tests {
         assert_eq!(vs.shadow.stats.pieces, 1);
         vs.opponent_left();
         assert!(vs.player_won());
+    }
+}
+
+#[cfg(test)]
+mod party_tests {
+    use super::*;
+
+    fn roster() -> Vec<(String, String)> {
+        ["a", "b", "c"].iter().map(|id| (id.to_string(), id.to_uppercase())).collect()
+    }
+
+    #[test]
+    fn party_attacks_go_to_one_rival_and_kos_decide_the_match() {
+        let mut player = Game::new(5);
+        let mut vs = Versus::new_party("a", &roster(), 5, &mut player);
+        assert_eq!(vs.name(), "2 RIVALS");
+        vs.update(COUNTDOWN + 0.1, &mut player);
+        let clear = crate::game::LineClear { rows: vec![36, 37], snapshot: vec![], t_spin: false, back_to_back: false, combo: 0, perfect_clear: false, attack: 2, cancelled: 0 };
+        vs.on_player_event(&Event::LinesCleared(clear));
+        let out = vs.take_outbox();
+        assert!(matches!(&out[..], [Msg::Hit { to, lines: 2 }] if to == "b" || to == "c"), "{out:?}");
+        vs.on_party("b", &Msg::Hit { to: "c".into(), lines: 4 }, &mut player);
+        assert_eq!(player.pending_garbage(), 0, "not for us");
+        vs.on_party("b", &Msg::Hit { to: "a".into(), lines: 4 }, &mut player);
+        assert_eq!(player.pending_garbage(), 4);
+        vs.on_party("b", &Msg::Ko, &mut player);
+        assert!(!vs.over());
+        vs.party_present(&["a".into()]);
+        assert!(vs.player_won(), "the last rival left the room");
+        assert_eq!(vs.party.as_ref().unwrap().my_place, Some(1));
+    }
+
+    #[test]
+    fn topping_out_in_a_party_sends_ko_and_takes_a_place() {
+        let mut player = Game::new(5);
+        let mut vs = Versus::new_party("a", &roster(), 5, &mut player);
+        vs.update(COUNTDOWN + 0.1, &mut player);
+        player.game_over = true;
+        vs.update(0.1, &mut player);
+        assert!(vs.take_outbox().contains(&Msg::Ko));
+        assert_eq!(vs.party.as_ref().unwrap().my_place, Some(3));
+        assert!(!vs.player_won());
     }
 }
 

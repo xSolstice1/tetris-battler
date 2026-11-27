@@ -13,6 +13,7 @@ mod input;
 mod monster_art;
 mod net;
 mod online;
+mod party;
 mod piece;
 mod progress;
 mod render;

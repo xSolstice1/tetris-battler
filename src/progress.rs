@@ -46,6 +46,8 @@ pub enum RunKind {
     Shadow { shadow: usize, won: bool, time: f32 },
     /// An online 1v1 against another player.
     Online { won: bool },
+    /// A party free-for-all: where we finished out of how many.
+    Party { place: u32, players: u32 },
 }
 
 /// The numbers of a finished run that progression cares about.
@@ -105,6 +107,11 @@ fn run_xp(run: &Run) -> u32 {
         RunKind::Shadow { won: false, .. } => 10,
         RunKind::Online { won: true } => 120,
         RunKind::Online { won: false } => 20,
+        // 150 for the win, down to 20 for last, by how many we outlasted.
+        RunKind::Party { place, players } => {
+            let beaten = players.saturating_sub(place.max(1)) as f32 / players.saturating_sub(1).max(1) as f32;
+            if place == 1 { 150 } else { 20 + (100.0 * beaten) as u32 }
+        }
     };
     base + mode
 }
@@ -189,7 +196,7 @@ impl Progress {
                 }
             }
             // Online results only earn XP (no per-player records yet).
-            RunKind::Online { .. } => {}
+            RunKind::Online { .. } | RunKind::Party { .. } => {}
             RunKind::Shadow { won, time, .. } => {
                 let key = shadow_key.unwrap_or("unknown").to_owned();
                 let r = self.records.entry(key).or_default();
