@@ -971,6 +971,7 @@ impl App {
             Screen::Menu { selected } => {
                 let items: Vec<MenuItem> = MENU.iter().map(|e| e.menu_item()).collect();
                 render::draw_menu(&items, *selected, self.hover, sound_on, self.progress.settings.scene, &self.progress);
+                render::warm_portraits();
             }
             Screen::Select { selected } => render::draw_select(&SHADOWS, *selected, self.hover, self.progress.settings.scene, &self.progress),
             Screen::Online(lobby) => render::draw_online(lobby, &self.player_name, &self.progress),

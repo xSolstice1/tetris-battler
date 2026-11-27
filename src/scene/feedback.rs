@@ -109,7 +109,7 @@ fn out_back(t: f32) -> f32 {
 /// Largest size (up to `size`) at which `text` fits in `width`.
 fn fit(v: &View, text: &str, size: f32, width: f32) -> f32 {
     let s = v.scale();
-    let w = measure_text(text, None, (size * s).max(1.0) as u16, 1.0).width / s;
+    let w = crate::render::text_px_width(text, None, size * s) / s;
     if w > width { size * width / w } else { size }
 }
 

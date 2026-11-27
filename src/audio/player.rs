@@ -19,7 +19,7 @@ pub const MUSIC_VOLUME: f32 = 0.3;
 /// Rendering time allowed per frame, seconds.
 const FRAME_BUDGET: f64 = 0.004;
 /// Sample-voices per `Render::step` call between clock checks.
-const STEP: usize = 60_000;
+const STEP: usize = 15_000;
 
 type Loading = Pin<Box<dyn Future<Output = Option<Sound>>>>;
 
@@ -264,6 +264,34 @@ impl Player {
                 old.stop();
             }
             *slot = Some(Loaded { track, stems, playing: false, vol: [0.0; STEMS] });
+        }
+    }
+}
+
+#[cfg(test)]
+mod chunk_timing {
+    use super::*;
+    /// The longest single piece of work music preparation does in one frame
+    /// (`--ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn longest_chunks() {
+        for track in [Track::Classic, Track::Battler, Track::shadow(0, 8), Track::shadow(4, 8), Track::shadow(7, 8)] {
+            let mut r = Render::new(track.song());
+            let mut worst = 0.0f64;
+            loop {
+                let t = std::time::Instant::now();
+                let done = r.step(STEP);
+                worst = worst.max(t.elapsed().as_secs_f64() * 1000.0);
+                if done {
+                    break;
+                }
+            }
+            let stems = r.finish();
+            let t = std::time::Instant::now();
+            let wav = encode_wav(&stems[0]);
+            let enc = t.elapsed().as_secs_f64() * 1000.0;
+            println!("{track:?}: worst step {worst:.1} ms, encode one stem {enc:.1} ms ({} KB)", wav.len() / 1024);
         }
     }
 }

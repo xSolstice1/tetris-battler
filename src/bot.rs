@@ -184,6 +184,8 @@ pub const SHADOWS: [Profile; 8] = [
 /// Where pieces appear (matches `Game`'s spawn).
 const SPAWN_X: i32 = 3;
 const SPAWN_Y: i32 = HIDDEN_ROWS as i32 - 1;
+/// How many of the best first moves a lookahead shadow also judges by the next piece.
+const LOOKAHEAD_WIDTH: usize = 12;
 /// Stack height plus incoming garbage (rows) from which a shadow plays to survive.
 const THREAT: u32 = 13;
 /// Rows of the visible field, from the top, around the spawn that must stay clear.
@@ -459,8 +461,22 @@ fn spin_placements(board: &Board, start: Active, prefix: &[Action]) -> Vec<Place
 /// it would clear and how many of the field's "holes" are really just the slot (they are
 /// waiting for the T, not mistakes). A spinner builds these.
 fn t_slot(b: &Board) -> Option<(usize, u32)> {
+    // Once per field: filled cells per row and each column's top (no board copies).
+    let mut filled = [0usize; TOTAL_ROWS];
+    let mut top = [TOTAL_ROWS; WIDTH];
+    for y in 0..TOTAL_ROWS {
+        for x in 0..WIDTH {
+            if b.get(x, y).is_some() {
+                filled[y] += 1;
+                top[x] = top[x].min(y);
+            }
+        }
+    }
+    // Slots sit at or below the stack's surface: start a few rows above its highest point.
+    let highest = *top.iter().min().unwrap_or(&TOTAL_ROWS);
+    let from = (highest as i32 - 3).max(HIDDEN_ROWS as i32 - 2);
     let mut best: Option<(usize, u32)> = None;
-    for y in HIDDEN_ROWS as i32 - 2..TOTAL_ROWS as i32 - 1 {
+    for y in from..TOTAL_ROWS as i32 - 1 {
         for x in -1..WIDTH as i32 - 1 {
             let a = Active { kind: PieceKind::T, rot: 2, x, y };
             if !b.fits(a.kind, a.rot, x, y) || b.fits(a.kind, a.rot, x, y + 1) {
@@ -473,16 +489,17 @@ fn t_slot(b: &Board) -> Option<(usize, u32)> {
             if b.fits(a.kind, a.rot, x, y - 1) && b.fits(a.kind, a.rot, x, y - 2) && b.fits(a.kind, a.rot, x, y - 3) {
                 continue;
             }
-            let mut t = b.clone();
-            t.place(a.kind, a.rot, x, y);
-            let full = a.cells().iter().map(|c| c.1).filter(|&r| (0..WIDTH).all(|cx| t.get(cx, r as usize).is_some())).collect::<std::collections::BTreeSet<_>>().len();
+            let cells = a.cells();
+            let mut full = 0;
+            for r in y..y + 3 {
+                let here = cells.iter().filter(|c| c.1 == r).count();
+                if here > 0 && filled[r as usize] + here == WIDTH {
+                    full += 1;
+                }
+            }
             if full >= 2 {
                 // Slot cells with a block somewhere above them count as holes in `field_score`.
-                let roofed = a
-                    .cells()
-                    .iter()
-                    .filter(|&&(cx, cy)| (0..cy).any(|yy| b.get(cx as usize, yy as usize).is_some()))
-                    .count() as u32;
+                let roofed = cells.iter().filter(|&&(cx, cy)| top[cx as usize] < cy as usize).count() as u32;
                 if best.is_none_or(|(f, _)| full > f) {
                     best = Some((full, roofed));
                 }
@@ -728,6 +745,17 @@ fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
         }
     }
     let now = Chain { b2b: game.back_to_back(), combo: game.combo() };
+    // First every placement on its own merits; then (for shadows that look ahead) the best
+    // few get a look at the next piece too. Deeper looks at the rest would only cost time.
+    struct First {
+        keys: Vec<Action>,
+        clear: f32,
+        chain: Chain,
+        field: Board,
+        after: PieceKind,
+        quick: f32,
+    }
+    let mut firsts: Vec<First> = Vec::new();
     let mut out = Vec::new();
     for (start, prefix, after) in starts {
         let options = if profile.spins { spin_placements(&game.board, start, &prefix) } else { placements(&game.board, start, &prefix) };
@@ -738,27 +766,36 @@ fn candidates(game: &Game, profile: Profile) -> Vec<Candidate> {
             };
             let (clear, chain) = clear_score(&first, now, pending, profile);
             let field = first.field;
+            let mut quick = clear + field_score(&field, p.piece, pending, profile);
             // Guardrail: never choose a field the next piece can't spawn into while another
             // choice exists (that's a self-inflicted block out).
-            let blocks_next = !field.fits(after, 0, SPAWN_X, SPAWN_Y);
-            let score = if blocks_next {
-                clear + field_score(&field, p.piece, pending, profile) - 1e5
-            } else if profile.lookahead {
-                // The best this field allows next, from which only its clears and final field count.
-                let best_next = placements(&field, spawn(after), &[])
-                    .into_iter()
-                    .filter_map(|p2| {
-                        let second = settle(&field, p2.piece, false)?;
-                        let (c2, _) = clear_score(&second, chain, pending, profile);
-                        Some(c2 + field_score(&second.field, p2.piece, pending, profile))
-                    })
-                    .fold(f32::MIN, f32::max);
-                clear + best_next.max(-1e5)
-            } else {
-                clear + field_score(&field, p.piece, pending, profile)
-            };
-            out.push(Candidate { score, actions: p.keys });
+            if !field.fits(after, 0, SPAWN_X, SPAWN_Y) {
+                quick -= 1e5;
+            }
+            firsts.push(First { keys: p.keys, clear, chain, field, after, quick });
         }
+    }
+    firsts.sort_by(|a, b| b.quick.total_cmp(&a.quick));
+    for (i, f) in firsts.into_iter().enumerate() {
+        // Under threat, look wider: survival hides in moves that score badly at first sight.
+        let width = if danger(&game.board, pending, profile) >= 1.0 { 2 * LOOKAHEAD_WIDTH } else { LOOKAHEAD_WIDTH };
+        let deep = profile.lookahead && i < width && f.quick > -1e4;
+        let score = if deep {
+            // The best this field allows next, from which only its clears and final field count.
+            let best_next = placements(&f.field, spawn(f.after), &[])
+                .into_iter()
+                .filter_map(|p2| {
+                    let second = settle(&f.field, p2.piece, false)?;
+                    let (c2, _) = clear_score(&second, f.chain, pending, profile);
+                    Some(c2 + field_score(&second.field, p2.piece, pending, profile))
+                })
+                .fold(f32::MIN, f32::max);
+            // Deep scores rank above every shallow one (they were the best first moves).
+            1e4 + f.clear + best_next.max(-1e5)
+        } else {
+            f.quick
+        };
+        out.push(Candidate { score, actions: f.keys });
     }
     out
 }
@@ -859,15 +896,17 @@ fn clear_score(s: &Settled, now: Chain, pending: u32, profile: Profile) -> (f32,
 /// a quad stack (with its well) and as a T-spin stack, and keeps whichever plan it favours.
 fn field_score(b: &Board, piece: Active, pending: u32, profile: Profile) -> f32 {
     if profile.spins {
-        let quad_plan = field_score_plan(b, piece, pending, profile, true);
-        let spin_plan = field_score_plan(b, piece, pending, profile, false);
+        let slot = t_slot(b);
+        let quad_plan = field_score_plan(b, piece, pending, profile, true, slot);
+        let spin_plan = field_score_plan(b, piece, pending, profile, false, slot);
         return quad_plan.max(spin_plan);
     }
-    field_score_plan(b, piece, pending, profile, profile.stacks_for_quads)
+    field_score_plan(b, piece, pending, profile, profile.stacks_for_quads, None)
 }
 
-/// `field_score` for one plan: `well` keeps the right column open for quads.
-fn field_score_plan(b: &Board, piece: Active, pending: u32, profile: Profile, well: bool) -> f32 {
+/// `field_score` for one plan: `well` keeps the right column open for quads; `slot` is the
+/// field's open T-spin slot (spinners only).
+fn field_score_plan(b: &Board, piece: Active, pending: u32, profile: Profile, well: bool, slot: Option<(usize, u32)>) -> f32 {
     let h = heights(b);
     let mut holes = 0;
     let mut covered = 0;
@@ -919,7 +958,7 @@ fn field_score_plan(b: &Board, piece: Active, pending: u32, profile: Profile, we
     if building && profile.spins {
         // A spinner keeps a T-spin slot open for its next T: the slot's empty cells aren't
         // holes, and a ready slot is worth a lot.
-        if let Some((rows, roofed)) = t_slot(b) {
+        if let Some((rows, roofed)) = slot {
             score += (w_hole + 1.6) * roofed as f32 + if rows >= 3 { 16.0 } else { 12.0 };
         }
     }
@@ -1171,27 +1210,43 @@ mod spin_tests {
 #[cfg(test)]
 mod timing {
     use super::*;
-    /// Worst and average time per decision for each shadow (`--ignored --nocapture`).
+    /// Decision time per shadow over long games under garbage (`--ignored --nocapture`):
+    /// average, 99th percentile and worst, and the worst perfect-clear search alone.
     #[test]
     #[ignore]
     fn decision_time() {
         for p in SHADOWS {
-            let mut g = Game::new(3);
-            g.set_level(1);
-            let mut bot = Bot::new(p, 3);
-            let (mut worst, mut total, mut n) = (0.0f64, 0.0f64, 0);
-            for _ in 0..200 {
-                if g.game_over { break; }
-                let t = std::time::Instant::now();
-                let keys = bot.choose(&g);
-                let ms = t.elapsed().as_secs_f64() * 1000.0;
-                worst = worst.max(ms);
-                total += ms;
-                n += 1;
-                for k in keys { g.apply(k); }
-                g.take_events();
+            let mut times = Vec::new();
+            let mut pc_worst = 0.0f64;
+            for seed in 1..=3u64 {
+                let mut g = Game::new(seed);
+                g.set_level(1);
+                let mut bot = Bot::new(p, seed);
+                for i in 0..400 {
+                    if g.game_over {
+                        break;
+                    }
+                    if i % 9 == 0 {
+                        g.receive_garbage(2);
+                    }
+                    if p.pc_search {
+                        let t = std::time::Instant::now();
+                        let _ = perfect_clear_move(&g);
+                        pc_worst = pc_worst.max(t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    let t = std::time::Instant::now();
+                    let keys = bot.choose(&g);
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    for k in keys {
+                        g.apply(k);
+                    }
+                    g.take_events();
+                }
             }
-            println!("{:15} avg {:.2} ms  worst {:.2} ms", p.name, total / n as f64, worst);
+            times.sort_by(|a, b| a.total_cmp(b));
+            let avg = times.iter().sum::<f64>() / times.len() as f64;
+            let p99 = times[(times.len() * 99 / 100).min(times.len() - 1)];
+            println!("{:18} avg {avg:.2} ms  p99 {p99:.2} ms  worst {:.2} ms  pc-search worst {pc_worst:.2} ms", p.name, times[times.len() - 1]);
         }
     }
 }

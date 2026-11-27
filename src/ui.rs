@@ -426,8 +426,8 @@ pub fn progress(v: &View, r: Rect, frac: f32, bar: &Bar) {
 
 // ───────────── Text ─────────────
 
-fn px(v: &View, size: f32) -> u16 {
-    (size * v.scale()).max(1.0) as u16
+fn px(v: &View, size: f32) -> f32 {
+    (size * v.scale()).max(1.0)
 }
 
 /// Width of letter-spaced text.
@@ -436,7 +436,7 @@ pub fn caps_w(v: &View, t: &str, size: f32, spacing: f32) -> f32 {
     let mut w = 0.0;
     let mut n = 0;
     for (i, ch) in t.char_indices() {
-        w += measure_text(&t[i..i + ch.len_utf8()], None, p, 1.0).width / v.scale();
+        w += crate::render::text_px_width(&t[i..i + ch.len_utf8()], None, p) / v.scale();
         n += 1;
     }
     w + spacing * (n.max(1) - 1) as f32
@@ -449,7 +449,7 @@ pub fn caps(v: &View, t: &str, x: f32, y: f32, size: f32, color: Color, spacing:
     for (i, ch) in t.char_indices() {
         let s = &t[i..i + ch.len_utf8()];
         v.text(s, cx, y, size, color);
-        cx += measure_text(s, None, p, 1.0).width / v.scale() + spacing;
+        cx += crate::render::text_px_width(s, None, p) / v.scale() + spacing;
     }
 }
 
@@ -463,7 +463,7 @@ pub fn caps_right(v: &View, t: &str, right: f32, y: f32, size: f32, color: Color
 
 /// Width of plain text.
 pub fn text_w(v: &View, t: &str, size: f32) -> f32 {
-    measure_text(t, None, px(v, size), 1.0).width / v.scale()
+    crate::render::text_px_width(t, None, px(v, size)) / v.scale()
 }
 
 /// The largest size, up to `size`, at which `t` fits in `width`.

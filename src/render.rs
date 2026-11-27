@@ -101,19 +101,19 @@ impl View {
 
     pub(crate) fn text(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
-        draw_text(t, self.ox + x * s, self.oy + y * s, size * s, c);
+        draw_glyphs(t, None, self.ox + x * s, self.oy + y * s, size * s, c);
     }
 
     pub(crate) fn text_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
-        let dims = measure_text(t, None, (size * s).max(1.0) as u16, 1.0);
-        draw_text(t, self.ox + right * s - dims.width, self.oy + y * s, size * s, c);
+        let w = text_px_width(t, None, size * s);
+        draw_glyphs(t, None, self.ox + right * s - w, self.oy + y * s, size * s, c);
     }
 
     pub fn text_centered(&self, t: &str, cx: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
-        let dims = measure_text(t, None, (size * s).max(1.0) as u16, 1.0);
-        draw_text(t, self.ox + cx * s - dims.width / 2.0, self.oy + y * s, size * s, c);
+        let w = text_px_width(t, None, size * s);
+        draw_glyphs(t, None, self.ox + cx * s - w / 2.0, self.oy + y * s, size * s, c);
     }
 
     fn ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32, c: Color) {
@@ -139,20 +139,18 @@ impl View {
     /// Text that may mix ASCII (the game's font) and Chinese (a small embedded subset).
     pub(crate) fn text_mixed(&self, t: &str, x: f32, y: f32, size: f32, c: Color) {
         let s = self.scale;
-        let px = (size * s).max(1.0) as u16;
         let mut cx = self.ox + x * s;
         for (run, cjk) in runs(t) {
             let font = if cjk { cjk_font() } else { None };
-            draw_text_ex(run, cx, self.oy + y * s, TextParams { font: font.as_ref(), font_size: px, color: c, ..Default::default() });
-            cx += measure_text(run, font.as_ref(), px, 1.0).width;
+            draw_glyphs(run, font.as_ref(), cx, self.oy + y * s, size * s, c);
+            cx += text_px_width(run, font.as_ref(), size * s);
         }
     }
 
     /// Width of `text_mixed` in virtual units.
     pub(crate) fn measure_mixed(&self, t: &str, size: f32) -> f32 {
         let s = self.scale;
-        let px = (size * s).max(1.0) as u16;
-        runs(t).map(|(run, cjk)| measure_text(run, if cjk { cjk_font() } else { None }.as_ref(), px, 1.0).width).sum::<f32>() / s
+        runs(t).map(|(run, cjk)| text_px_width(run, if cjk { cjk_font() } else { None }.as_ref(), size * s)).sum::<f32>() / s
     }
 
     pub(crate) fn text_mixed_right(&self, t: &str, right: f32, y: f32, size: f32, c: Color) {
@@ -544,6 +542,30 @@ fn draw_board_theme(v: &View, theme: skins::BoardTheme, x: f32, y: f32, cell: f3
             grid_lines(with_alpha(grid, 0.55), true, true);
         }
     }
+}
+
+/// Glyph sizes text is rasterised at (screen px), about 19% apart. Every other size is
+/// drawn from the next one up, scaled down: the font's glyph atlas stays small, instead of
+/// rasterising (and re-uploading) a new set for every size an animation passes through.
+const GLYPH_SIZES: [u16; 22] = [8, 10, 12, 14, 16, 19, 22, 26, 31, 37, 44, 52, 62, 74, 88, 104, 124, 148, 176, 208, 248, 296];
+
+/// The glyph size to rasterise for `px`, and the scale from it to `px`.
+pub(crate) fn glyph_size(px: f32) -> (u16, f32) {
+    let px = px.max(1.0);
+    let size = GLYPH_SIZES.iter().copied().find(|&g| g as f32 >= px).unwrap_or(GLYPH_SIZES[GLYPH_SIZES.len() - 1]);
+    (size, px / size as f32)
+}
+
+/// Draws `t` at `px` screen pixels (baseline at `y`).
+fn draw_glyphs(t: &str, font: Option<&Font>, x: f32, y: f32, px: f32, c: Color) {
+    let (size, scale) = glyph_size(px);
+    draw_text_ex(t, x, y, TextParams { font, font_size: size, font_scale: scale, color: c, ..Default::default() });
+}
+
+/// Width of `t` at `px` screen pixels.
+pub(crate) fn text_px_width(t: &str, font: Option<&Font>, px: f32) -> f32 {
+    let (size, scale) = glyph_size(px);
+    measure_text(t, font, size, scale).width
 }
 
 /// Splits text into runs of ASCII and of other (Chinese) characters, flagging the latter.
@@ -1284,6 +1306,21 @@ fn portrait(key: &str) -> Option<Texture2D> {
         c.push((key.to_owned(), t.clone()));
         Some(t)
     })
+}
+
+/// Decodes one not-yet-loaded portrait (call once a frame on the menu), so opening the
+/// shadow list never decodes all of them in the same frame.
+pub fn warm_portraits() {
+    thread_local! {
+        static NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    NEXT.with(|n| {
+        let i = n.get();
+        if let Some(p) = crate::bot::SHADOWS.get(i) {
+            let _ = portrait(p.portrait);
+            n.set(i + 1);
+        }
+    });
 }
 
 /// A portrait in a frame of the shadow's colour (nothing if it has none).
@@ -2097,6 +2134,14 @@ mod tests {
 #[cfg(test)]
 mod select_tests {
     use super::*;
+
+    #[test]
+    fn text_sizes_snap_to_a_few_glyph_sizes() {
+        let sizes: std::collections::BTreeSet<u16> = (10..400).map(|px| glyph_size(px as f32 * 0.5).0).collect();
+        assert!(sizes.len() <= GLYPH_SIZES.len());
+        let (s, k) = glyph_size(30.0);
+        assert!(s >= 30 && (k * s as f32 - 30.0).abs() < 1e-3 && k <= 1.0);
+    }
 
     #[test]
     fn text_splits_into_ascii_and_chinese_runs() {

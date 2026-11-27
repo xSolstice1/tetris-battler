@@ -626,9 +626,18 @@ pub struct Render {
     stems: Vec<Vec<f32>>,
     jobs: Vec<Job>,
     next: usize,
-    /// Post-processing stages done: one per stem, then the final mixdown.
+    /// Post-processing steps done (`POST_OPS` per stem, then the mixdown's), each one
+    /// pass over a stem so a frame's budget can stop between any two of them.
     post: usize,
+    /// A stem's dry copy while its echo taps are added.
+    dry: Vec<f32>,
 }
+
+/// Per stem: keep the dry signal, four echo taps, the sidechain pump, DC removal, level.
+const POST_OPS: usize = 8;
+/// The mixdown: mono sum, peak search, gain.
+const MIX_OPS: usize = 3;
+const POST_TOTAL: usize = STEMS * POST_OPS + MIX_OPS;
 
 fn vel_of(c: u8) -> Option<f32> {
     match c {
@@ -649,6 +658,7 @@ impl Render {
             jobs: Vec::new(),
             next: 0,
             post: 0,
+            dry: Vec::new(),
         };
         r.schedule();
         r
@@ -788,14 +798,14 @@ impl Render {
         while spent < budget {
             if self.next < self.jobs.len() {
                 spent += self.run_job();
-            } else if self.post <= STEMS {
-                spent += self.post_stage(self.post);
+            } else if self.post < POST_TOTAL {
+                spent += self.post_op(self.post);
                 self.post += 1;
             } else {
                 break;
             }
         }
-        self.post > STEMS
+        self.post >= POST_TOTAL
     }
 
     fn run_job(&mut self) -> usize {
@@ -837,51 +847,76 @@ impl Render {
         Self::cost(&job).max(1000)
     }
 
-    /// Stage `k < STEMS` finishes stem `k` (echo, sidechain, DC, level); stage
-    /// `STEMS` mixes down (mono songs) and normalises. Returns a rough cost.
-    fn post_stage(&mut self, k: usize) -> usize {
+    /// Post-processing step `p`: for stem `p / POST_OPS`, op `p % POST_OPS` (dry copy, echo
+    /// taps 1-4, sidechain, DC, level); then the mixdown's ops. One pass over a stem each.
+    /// Returns a rough cost.
+    fn post_op(&mut self, p: usize) -> usize {
         let s = self.song;
         let n = s.loop_len();
-        if k < STEMS {
+        if p < STEMS * POST_OPS {
+            let (k, op) = (p / POST_OPS, p % POST_OPS);
+            let feedback = match k {
+                LEAD if s.lead_voice.echo > 0.0 => s.lead_voice.echo,
+                HYPE => 0.25,
+                _ => 0.0,
+            };
             let buf = &mut self.stems[k];
-            let echo_delay = s.steps_to_samples(3);
-            match k {
-                LEAD if s.lead_voice.echo > 0.0 => echo(buf, echo_delay, s.lead_voice.echo),
-                HYPE => echo(buf, echo_delay, 0.25),
-                _ => {}
+            match op {
+                0 if feedback > 0.0 => self.dry = buf.clone(),
+                1..=4 if feedback > 0.0 => {
+                    let tap = op;
+                    let d = (s.steps_to_samples(3) * tap) % n;
+                    echo_tap(buf, &self.dry, d, feedback.powi(tap as i32));
+                    if tap == 4 {
+                        self.dry = Vec::new();
+                    }
+                }
+                5 if s.pump > 0.0 && matches!(k, PAD | BASS | HYPE) => {
+                    let env = pump_env(n, &s.kick_samples(), s.pump, s.step_secs() * 2.5);
+                    for (x, g) in buf.iter_mut().zip(&env) {
+                        *x *= g;
+                    }
+                }
+                6 => dc_block_loop(buf),
+                7 => {
+                    // Stems come out at wildly different raw levels; even them out, then apply the mix.
+                    let rms = rms(buf);
+                    if rms > 0.0 {
+                        let g = s.gains[k] * 0.2 / rms;
+                        buf.iter_mut().for_each(|x| *x *= g);
+                    }
+                }
+                _ => return 1000,
             }
-            if s.pump > 0.0 && matches!(k, PAD | BASS | HYPE) {
-                let env = pump_env(n, &s.kick_samples(), s.pump, s.step_secs() * 2.5);
-                for (x, g) in buf.iter_mut().zip(&env) {
-                    *x *= g;
+            return n * 2;
+        }
+        match p - STEMS * POST_OPS {
+            0 => {
+                if s.mono {
+                    let mut mix = vec![0.0; n];
+                    for buf in &self.stems {
+                        for (m, x) in mix.iter_mut().zip(buf) {
+                            *m += x;
+                        }
+                    }
+                    self.stems = vec![mix];
                 }
             }
-            dc_block_loop(buf);
-            // Stems come out at wildly different raw levels; even them out, then apply the mix.
-            let rms = rms(buf);
-            if rms > 0.0 {
-                let g = s.gains[k] * 0.2 / rms;
-                buf.iter_mut().for_each(|x| *x *= g);
+            1 => {
+                let peak_sum = (0..n).map(|i| self.stems.iter().map(|b| b[i]).sum::<f32>().abs()).fold(0.0, f32::max);
+                let peak_one = self.stems.iter().flatten().fold(0.0f32, |m, x| m.max(x.abs()));
+                self.dry = vec![peak_sum.max(peak_one)];
             }
-            return n * 12;
-        }
-        if s.mono {
-            let mut mix = vec![0.0; n];
-            for buf in &self.stems {
-                for (m, x) in mix.iter_mut().zip(buf) {
-                    *m += x;
+            _ => {
+                let peak = self.dry.first().copied().unwrap_or(0.0);
+                if peak > 0.0 {
+                    let g = MIX_PEAK / peak;
+                    self.stems.iter_mut().flatten().for_each(|x| *x *= g);
                 }
+                self.dry = Vec::new();
             }
-            self.stems = vec![mix];
         }
-        let peak_sum = (0..n).map(|i| self.stems.iter().map(|b| b[i]).sum::<f32>().abs()).fold(0.0, f32::max);
-        let peak_one = self.stems.iter().flatten().fold(0.0f32, |m, x| m.max(x.abs()));
-        let peak = peak_sum.max(peak_one);
-        if peak > 0.0 {
-            let g = MIX_PEAK / peak;
-            self.stems.iter_mut().flatten().for_each(|x| *x *= g);
-        }
-        n * 8
+        n * 3
     }
 
     /// The finished stems (`STEMS` of them, or one for a `mono` song), rendering
@@ -914,22 +949,18 @@ fn add_wrapped(dst: &mut [f32], src: &[f32], at: usize) {
 }
 
 /// Circular feedback echo: each repeat wraps round the loop like the notes do.
-fn echo(buf: &mut [f32], delay: usize, feedback: f32) {
+/// One echo tap: `buf[i] += dry[i - d] * gain`, wrapping (the first `d` samples hear the
+/// loop's end). Four of these with gains feedback^1..4 make `echo`.
+fn echo_tap(buf: &mut [f32], dry: &[f32], d: usize, gain: f32) {
     let n = buf.len();
-    let dry = buf.to_vec();
-    let mut g = feedback;
-    for k in 1..=4 {
-        let d = (delay * k) % n;
-        // buf[i] += dry[i - d], wrapping: the first `d` samples hear the loop's end.
-        for (b, x) in buf[d..].iter_mut().zip(&dry) {
-            *b += x * g;
-        }
-        for (b, x) in buf[..d].iter_mut().zip(&dry[n - d..]) {
-            *b += x * g;
-        }
-        g *= feedback;
+    for (b, x) in buf[d..].iter_mut().zip(dry) {
+        *b += x * gain;
+    }
+    for (b, x) in buf[..d].iter_mut().zip(&dry[n - d..]) {
+        *b += x * gain;
     }
 }
+
 
 /// Removes DC (and sub-sonic rumble) with a 20 Hz high-pass run round the loop
 /// twice, so the filter's state at the seam matches the loop's end.
